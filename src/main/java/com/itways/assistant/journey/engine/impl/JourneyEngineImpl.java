@@ -1,0 +1,211 @@
+package com.itways.assistant.journey.engine.impl;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.springframework.stereotype.Service;
+
+import com.itways.assistant.journey.engine.model.ExecutionContext;
+import com.itways.assistant.journey.engine.model.ExecutionStatus;
+import com.itways.assistant.journey.engine.model.Journey;
+import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepResult;
+import com.itways.assistant.journey.engine.service.JourneyEngine;
+import com.itways.assistant.journey.engine.service.StepHandler;
+import com.itways.assistant.journey.engine.service.StepHandlerRegistry;
+
+import lombok.RequiredArgsConstructor;
+
+@Service
+@RequiredArgsConstructor
+public class JourneyEngineImpl implements JourneyEngine {
+
+    private final StepHandlerRegistry handlerRegistry;
+
+    @Override
+    public Map<String, Object> start(Journey journey, String accountId, Map<String, Object> initialParams) {
+        ExecutionContext context = ExecutionContext.builder()
+                .journeyId(journey.getId())
+                .accountId(accountId)
+                .currentStepIndex(-1)
+                .status(ExecutionStatus.RUNNING)
+                .variables(new HashMap<>(initialParams))
+                .build();
+
+        return execute(journey, context);
+    }
+
+    @Override
+    public Map<String, Object> resume(Journey journey, ExecutionContext context, Map<String, Object> inputParams) {
+        context.getVariables().putAll(inputParams);
+        context.setStatus(ExecutionStatus.RUNNING);
+        return execute(journey, context);
+    }
+
+    private Map<String, Object> execute(Journey journey, ExecutionContext context) {
+    	
+    	System.out.println("START JOURNEY EXECUTION>>");
+        Map<String, Object> result = new HashMap<>();
+        List<Map<String, Object>> stepResults = new ArrayList<>();
+
+        List<JourneyStep> sortedSteps = sortSteps(journey.getSteps());
+        int startIndex = context.getCurrentStepIndex();
+
+        for (JourneyStep step : sortedSteps) {
+            int stepOrder = step.getStepOrder();
+
+            // Skip already completed steps (Resumption logic)
+            if (stepOrder <= startIndex) {
+                continue;
+            }
+
+            // check branch eligibility
+            if (!isEligible(step, context)) {
+                continue;
+            }
+
+            StepHandler handler = handlerRegistry.getHandler(step.getActionType());
+            if (handler == null) {
+                stepResults.add(createErrorResult(step, "No handler found for type: " + step.getActionType()));
+                if (!step.isContinueOnError()) {
+                    context.setStatus(ExecutionStatus.ERROR);
+                    break;
+                }
+                continue;
+            }
+
+            StepResult stepResult = handler.execute(step, context);
+
+            Map<String, Object> viewResult = new HashMap<>();
+            viewResult.put("type", step.getActionType());
+            viewResult.put("id", step.getId());
+            viewResult.put("clientVisible", step.isClientVisible());
+            viewResult.put("status", stepResult.getStatus());
+
+            if ("SUCCESS".equals(stepResult.getStatus())) {
+                viewResult.put("message", stepResult.getMessage());
+                if (stepResult.getData() != null) {
+                    viewResult.put("data", stepResult.getData());
+                }
+                stepResults.add(viewResult);
+                context.setCurrentStepIndex(stepOrder);
+            } else if ("WAITING".equals(stepResult.getStatus())) {
+                viewResult.putAll(stepResult.getMetadata());
+                stepResults.add(viewResult);
+                // Pause execution
+                result.put("status", "WAITING");
+                result.put("stepResults", stepResults);
+                result.put("context", context);
+                return result;
+            } else {
+                viewResult.put("message", stepResult.getMessage());
+                stepResults.add(viewResult);
+                if (!step.isContinueOnError()) {
+                    context.setStatus(ExecutionStatus.ERROR);
+                    break;
+                }
+            }
+        }
+
+        if (context.getStatus() == ExecutionStatus.RUNNING) {
+            context.setStatus(ExecutionStatus.COMPLETED);
+            result.put("status", "FINISHED");
+        } else if (context.getStatus() == ExecutionStatus.ERROR) {
+            result.put("status", "ERROR");
+        }
+
+        result.put("stepResults", stepResults);
+        result.put("context", context);
+
+        // Final message extraction (last success message)
+        for (int i = stepResults.size() - 1; i >= 0; i--) {
+            Map<String, Object> r = stepResults.get(i);
+            if ("SUCCESS".equals(r.get("status")) && r.containsKey("message") && r.get("message") != null) {
+                result.put("message", r.get("message"));
+                break;
+            }
+        }
+
+        return result;
+    }
+
+    private List<JourneyStep> sortSteps(List<JourneyStep> steps) {
+        // Simple sorting by order for now, actual implementation might need DAG
+        // traversal if steps are not strictly sequential
+        // Based on JourneyExecutor's DFS:
+        Map<Integer, List<Integer>> adj = new HashMap<>();
+        Map<Integer, JourneyStep> stepMap = new HashMap<>();
+        for (JourneyStep s : steps) {
+            stepMap.put(s.getStepOrder(), s);
+            if (s.getParentOrder() != null && s.getParentOrder() > 0) {
+                adj.computeIfAbsent(s.getParentOrder(), k -> new ArrayList<>()).add(s.getStepOrder());
+            }
+        }
+
+        List<Integer> sortedIndices = new ArrayList<>();
+        Set<Integer> visited = new HashSet<>();
+        for (JourneyStep s : steps) {
+            if (s.getParentOrder() == null || s.getParentOrder() == 0) {
+                if (!visited.contains(s.getStepOrder())) {
+                    dfs(s.getStepOrder(), adj, sortedIndices, visited);
+                }
+            }
+        }
+
+        List<JourneyStep> result = new ArrayList<>();
+        for (int i : sortedIndices) {
+            result.add(stepMap.get(i));
+        }
+        return result;
+    }
+
+    private void dfs(int current, Map<Integer, List<Integer>> adj, List<Integer> sorted, Set<Integer> visited) {
+        visited.add(current);
+        sorted.add(current);
+        List<Integer> children = adj.get(current);
+        if (children != null) {
+            for (int child : children) {
+                if (!visited.contains(child))
+                    dfs(child, adj, sorted, visited);
+            }
+        }
+    }
+
+    private boolean isEligible(JourneyStep step, ExecutionContext context) {
+        if (step.getParentOrder() == null || step.getParentOrder() == 0) {
+            return true;
+        }
+
+        Object parentResult = context.getStepResults().get(step.getParentOrder());
+        String requiredBranch = step.getBranchName();
+
+        if (requiredBranch == null)
+            return true;
+        if (parentResult == null)
+            return false;
+
+        if (parentResult instanceof Boolean) {
+            boolean boolResult = (Boolean) parentResult;
+            return (requiredBranch.equalsIgnoreCase("true") && boolResult)
+                    || (requiredBranch.equalsIgnoreCase("false") && !boolResult);
+        } else {
+            String parentValStr = String.valueOf(parentResult);
+            // Default branch logic would need more info about siblings,
+            // but for now we follow the existing pattern:
+            return requiredBranch.equalsIgnoreCase(parentValStr) || "DEFAULT".equalsIgnoreCase(requiredBranch);
+        }
+    }
+
+    private Map<String, Object> createErrorResult(JourneyStep step, String message) {
+        Map<String, Object> res = new HashMap<>();
+        res.put("type", step.getActionType());
+        res.put("id", step.getId());
+        res.put("status", "ERROR");
+        res.put("message", message);
+        return res;
+    }
+}
