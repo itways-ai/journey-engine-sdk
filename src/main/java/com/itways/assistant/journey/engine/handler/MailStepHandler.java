@@ -16,7 +16,7 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class MailStepHandler implements StepHandler {
 
-//    private final NotificationPort notificationPort;
+    // private final NotificationPort notificationPort;
     private final ObjectMapper objectMapper;
     private final EngineUtils engineUtils;
 
@@ -31,12 +31,11 @@ public class MailStepHandler implements StepHandler {
             String configJson = step.getApiConfig();
             MailConfig mailConfig = objectMapper.readValue(configJson, MailConfig.class);
 
-//            notificationPort.sendMail(mailConfig, context.getVariables());
+            // notificationPort.sendMail(mailConfig, context.getVariables());
 
             String result = "Mail sent to " + mailConfig.getTo();
             context.addStepResult(step.getStepOrder(), result);
-
-            return StepResult.success(result);
+            return StepResult.success(result, step.getMessage() != null ? step.getMessage() : result);
         } catch (Exception e) {
             return StepResult.error("Mail Send Failed: " + e.getMessage());
         }

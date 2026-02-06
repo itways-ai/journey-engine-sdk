@@ -25,6 +25,14 @@ public class StepResult {
                 .build();
     }
 
+    public static StepResult success(Object data, String message) {
+        return StepResult.builder()
+                .status("SUCCESS")
+                .data(data)
+                .message(message)
+                .build();
+    }
+
     public static StepResult error(String message) {
         return StepResult.builder()
                 .status("ERROR")

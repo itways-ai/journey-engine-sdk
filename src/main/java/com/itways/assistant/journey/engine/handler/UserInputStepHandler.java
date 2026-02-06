@@ -38,7 +38,7 @@ public class UserInputStepHandler implements StepHandler {
             Object val = context.getVariables().get(safeName);
             // Re-sync to context if it was added as a flat variable
             context.addStepResult(step.getStepOrder(), val);
-            return StepResult.success(val);
+            return StepResult.success(val, step.getMessage());
         } else {
             // Pause execution
             context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);

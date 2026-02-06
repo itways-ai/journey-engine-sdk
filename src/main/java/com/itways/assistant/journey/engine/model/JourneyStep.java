@@ -38,6 +38,7 @@ public class JourneyStep {
     private String conditionExpression;
     private String branchName;
     private Integer parentOrder;
+    private String message;
     @Builder.Default
     private Boolean clientVisible = true; // Visibility in Chat UI
 

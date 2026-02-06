@@ -14,7 +14,7 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class TemplateRenderHandler implements StepHandler {
 
-//    private final TemplateRendererPort templateRenderer;
+    // private final TemplateRendererPort templateRenderer;
     private final EngineUtils engineUtils;
 
     @Override
@@ -28,7 +28,7 @@ public class TemplateRenderHandler implements StepHandler {
             Long templateId = Long.parseLong(step.getActionTarget());
             // In a real implementation, we'd load the ApiConfig for allowMissingInputs flag
             // For now, simplicity:
-//            templateRenderer.render(templateId, context.getVariables(), false);
+            // templateRenderer.render(templateId, context.getVariables(), false);
             String rendered = "";
             context.addStepResult(step.getStepOrder(), rendered);
             context.setVariable("step" + step.getStepOrder(), rendered);
@@ -36,7 +36,7 @@ public class TemplateRenderHandler implements StepHandler {
                 context.setVariable(engineUtils.sanitizeKey(step.getStepName()), rendered);
             }
 
-            return StepResult.success(rendered);
+            return StepResult.success(rendered, step.getMessage());
         } catch (Exception e) {
             return StepResult.error("Template Rendering Failed: " + e.getMessage());
         }

@@ -72,7 +72,7 @@ public class DataMapStepHandler implements StepHandler {
 				context.setVariable(engineUtils.sanitizeKey(step.getStepName()), mappedData);
 			}
 
-			return StepResult.success(mappedData);
+			return StepResult.success(mappedData, step.getMessage());
 		} catch (Exception e) {
 			return StepResult.error("Data Mapping Failed: " + e.getMessage());
 		}

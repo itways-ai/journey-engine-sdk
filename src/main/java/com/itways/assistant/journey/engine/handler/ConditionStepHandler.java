@@ -32,6 +32,6 @@ public class ConditionStepHandler implements StepHandler {
 			context.setVariable(engineUtils.sanitizeKey(step.getStepName()), cond);
 		}
 
-		return StepResult.builder().status("SUCCESS").data(cond).build();
+		return StepResult.success(cond, step.getMessage());
 	}
 }

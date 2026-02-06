@@ -39,10 +39,11 @@ public class TriggerIntentStepHandler implements StepHandler {
             context.setVariable(engineUtils.sanitizeKey(step.getStepName()), action);
         }
 
+        String defaultMessage = "Triggering intent: " + action;
         return StepResult.builder()
                 .status("SUCCESS")
                 .actionTarget(action)
-                .message("Triggering intent: " + action)
+                .message(step.getMessage() != null ? step.getMessage() : defaultMessage)
                 .data(action)
                 .build();
     }

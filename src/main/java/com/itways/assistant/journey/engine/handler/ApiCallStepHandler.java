@@ -57,7 +57,7 @@ public class ApiCallStepHandler implements StepHandler {
 				context.getVariables().putAll((java.util.Map<String, Object>) apiResult);
 			}
 
-			return StepResult.success(apiResult);
+			return StepResult.success(apiResult, step.getMessage());
 		} catch (Exception e) {
 			return StepResult.error("API Call Failed: " + e.getMessage());
 		}
