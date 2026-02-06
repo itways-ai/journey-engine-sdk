@@ -47,8 +47,8 @@ public class JourneyEngineImpl implements JourneyEngine {
     }
 
     private Map<String, Object> execute(Journey journey, ExecutionContext context) {
-    	
-    	System.out.println("START JOURNEY EXECUTION>>");
+
+        System.out.println("START JOURNEY EXECUTION>>");
         Map<String, Object> result = new HashMap<>();
         List<Map<String, Object>> stepResults = new ArrayList<>();
 
@@ -83,6 +83,7 @@ public class JourneyEngineImpl implements JourneyEngine {
             Map<String, Object> viewResult = new HashMap<>();
             viewResult.put("type", step.getActionType());
             viewResult.put("id", step.getId());
+            viewResult.put("stepName", step.getStepName());
             viewResult.put("clientVisible", step.isClientVisible());
             viewResult.put("status", stepResult.getStatus());
 
@@ -204,6 +205,7 @@ public class JourneyEngineImpl implements JourneyEngine {
         Map<String, Object> res = new HashMap<>();
         res.put("type", step.getActionType());
         res.put("id", step.getId());
+        res.put("stepName", step.getStepName());
         res.put("status", "ERROR");
         res.put("message", message);
         return res;
