@@ -25,7 +25,7 @@ import lombok.RequiredArgsConstructor;
 @Component
 @RequiredArgsConstructor
 public class DataMapStepHandler implements StepHandler {
-	private static final String DEFAULT_FILL_SYSTEM_PROMPT = "You are a data mapping AI. Your goal is to fill a JSON template using information from the user's text. Follow the instructions strictly and return ONLY the resulting JSON.";
+	private static final String DEFAULT_FILL_SYSTEM_PROMPT = "You are a data mapping AI. Your goal is to fill a JSON template using information from the user's input (text and files). Follow the instructions strictly and return ONLY the resulting JSON.";
 
 	private final AiService aiService;
 	private final ObjectMapper objectMapper;
