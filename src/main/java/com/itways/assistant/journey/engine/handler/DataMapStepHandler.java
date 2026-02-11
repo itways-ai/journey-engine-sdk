@@ -55,12 +55,21 @@ public class DataMapStepHandler implements StepHandler {
 
 			String userPrompt = templateRender.renderFromString(DataMapped.PROMPT, model);
 
+			@SuppressWarnings("unchecked")
+			List<com.itways.assistant.ai.dto.AiWrappedFile> files = (List<com.itways.assistant.ai.dto.AiWrappedFile>) context
+					.getVariable("files");
+
 			AiChatRequest chatRequest = AiChatRequest.builder()
 					.messages(List.of(AiMessage.system(DEFAULT_FILL_SYSTEM_PROMPT), AiMessage.user(userPrompt)))
+					.files(files)
 					.config(aiRequestConfig).build();
 
 			AiResponse nlpResult = aiService.chat(chatRequest);
-			Object mappedData = objectMapper.readValue(nlpResult.getContent(), Object.class);
+
+			// Strip markdown code blocks if present (AI often returns ```json ... ```)
+			String cleanedContent = stripMarkdownCodeBlocks(nlpResult.getContent());
+
+			Object mappedData = objectMapper.readValue(cleanedContent, Object.class);
 
 			if (mappedData instanceof Map) {
 				mappedData = unflattenMap((Map<String, Object>) mappedData);
@@ -76,6 +85,38 @@ public class DataMapStepHandler implements StepHandler {
 		} catch (Exception e) {
 			return StepResult.error("Data Mapping Failed: " + e.getMessage());
 		}
+	}
+
+	/**
+	 * Strips markdown code block formatting from AI responses.
+	 * Handles formats like: ```json {...} ```, ``` {...} ```, or plain JSON
+	 */
+	private String stripMarkdownCodeBlocks(String content) {
+		if (content == null) {
+			return content;
+		}
+
+		// Trim whitespace
+		String trimmed = content.trim();
+
+		// Check if wrapped in code blocks (```json or ``` at start)
+		if (trimmed.startsWith("```")) {
+			// Remove opening ```json or ```
+			int firstNewline = trimmed.indexOf('\n');
+			if (firstNewline > 0) {
+				trimmed = trimmed.substring(firstNewline + 1);
+			}
+
+			// Remove closing ```
+			if (trimmed.endsWith("```")) {
+				trimmed = trimmed.substring(0, trimmed.length() - 3);
+			}
+
+			// Trim again after removing markers
+			trimmed = trimmed.trim();
+		}
+
+		return trimmed;
 	}
 
 	private Map<String, Object> unflattenMap(Map<String, Object> source) {

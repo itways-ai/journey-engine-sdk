@@ -19,7 +19,9 @@ import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.service.StepHandlerRegistry;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class JourneyEngineImpl implements JourneyEngine {
@@ -52,7 +54,16 @@ public class JourneyEngineImpl implements JourneyEngine {
         Map<String, Object> result = new HashMap<>();
         List<Map<String, Object>> stepResults = new ArrayList<>();
 
-        List<JourneyStep> sortedSteps = sortSteps(journey.getSteps());
+        List<JourneyStep> steps = journey.getSteps();
+        if (steps == null || steps.isEmpty()) {
+            log.warn("Journey '{}' has no steps defined.", journey.getTriggerIntent());
+            result.put("status", "FINISHED");
+            result.put("message", "This journey has no steps configured.");
+            result.put("context", context);
+            return result;
+        }
+
+        List<JourneyStep> sortedSteps = sortSteps(steps);
         int startIndex = context.getCurrentStepIndex();
 
         for (JourneyStep step : sortedSteps) {
@@ -182,12 +193,14 @@ public class JourneyEngineImpl implements JourneyEngine {
         }
 
         Object parentResult = context.getStepResults().get(step.getParentOrder());
+
+        if (parentResult == null)
+            return false;
+
         String requiredBranch = step.getBranchName();
 
         if (requiredBranch == null)
             return true;
-        if (parentResult == null)
-            return false;
 
         if (parentResult instanceof Boolean) {
             boolean boolResult = (Boolean) parentResult;
