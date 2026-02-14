@@ -1,8 +1,18 @@
 # Maven
 target/
+/target/
 
 # Gradle
 build/
+
+# Eclipse
+.factorypath
+.project
+.classpath
+.settings/
+
+# Generated sources (MapStruct, etc.)
+target/generated-sources/
 
 # IDE
 .idea/
