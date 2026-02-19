@@ -17,6 +17,7 @@ import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.JourneyEngine;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.service.StepHandlerRegistry;
+import com.itways.assistant.journey.engine.util.EngineUtils;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,6 +28,7 @@ import lombok.extern.slf4j.Slf4j;
 public class JourneyEngineImpl implements JourneyEngine {
 
     private final StepHandlerRegistry handlerRegistry;
+    private final EngineUtils engineUtils;
 
     @Override
     public Map<String, Object> start(Journey journey, String accountId, Map<String, Object> initialParams) {
@@ -82,14 +84,23 @@ public class JourneyEngineImpl implements JourneyEngine {
             StepHandler handler = handlerRegistry.getHandler(step.getActionType());
             if (handler == null) {
                 stepResults.add(createErrorResult(step, "No handler found for type: " + step.getActionType()));
-                if (!step.isContinueOnError()) {
+                if (step.isContinueOnError()) {
+                    context.addStepResult(stepOrder, "FAILED");
+                    context.setCurrentStepIndex(stepOrder);
+                } else {
                     context.setStatus(ExecutionStatus.ERROR);
                     break;
                 }
                 continue;
             }
 
-            StepResult stepResult = handler.execute(step, context);
+            StepResult stepResult;
+            try {
+                stepResult = handler.execute(step, context);
+            } catch (Exception e) {
+                log.error("Unhandled exception in handler for type: {}", step.getActionType(), e);
+                stepResult = StepResult.error("Internal Handler Error: " + e.getMessage());
+            }
 
             Map<String, Object> viewResult = new HashMap<>();
             viewResult.put("type", step.getActionType());
@@ -116,7 +127,17 @@ public class JourneyEngineImpl implements JourneyEngine {
             } else {
                 viewResult.put("message", stepResult.getMessage());
                 stepResults.add(viewResult);
-                if (!step.isContinueOnError()) {
+                if (step.isContinueOnError()) {
+                    context.addStepResult(stepOrder, "FAILED");
+                    context.setCurrentStepIndex(stepOrder);
+
+                    // Propagate "FAILED" status to variables so subsequent steps don't see nulls
+                    context.setVariable("step" + stepOrder, "FAILED");
+                    context.setVariable("lastStep", "FAILED");
+                    if (step.getStepName() != null && !step.getStepName().isEmpty()) {
+                        context.setVariable(engineUtils.sanitizeKey(step.getStepName()), "FAILED");
+                    }
+                } else {
                     context.setStatus(ExecutionStatus.ERROR);
                     break;
                 }
