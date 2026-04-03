@@ -34,11 +34,26 @@ public class UserInputStepHandler implements StepHandler {
                 .sanitizeKey(step.getStepName() != null ? step.getStepName() : ("step" + step.getStepOrder()));
         ApiConfig uiConfig = loadApiConfig(step.getApiConfig());
 
-        if (context.getVariables().containsKey(safeName)) {
-            Object val = context.getVariables().get(safeName);
+        if (context.getVariables().containsKey(safeName) || context.getVariables().containsKey("userInputAnswer")) {
+            Object val = context.getVariables().containsKey(safeName) 
+                ? context.getVariables().get(safeName) 
+                : context.getVariables().get("userInputAnswer");
+            
             // Re-sync to context if it was added as a flat variable
             context.addStepResult(step.getStepOrder(), val);
-            return StepResult.success(val, step.getMessage());
+            
+            // If it was a generic 'userInputAnswer' consumption, sync it to the safe name
+            if (!context.getVariables().containsKey(safeName)) {
+                context.getVariables().put(safeName, val);
+            }
+            // Clean up to avoid it being reused by another UserInput in the same turn
+            context.getVariables().remove("userInputAnswer");
+
+            String successPrompt = (step.getMessage() != null && !step.getMessage().isEmpty()) 
+                ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables()) // Render !
+                : step.getMessage();
+
+            return StepResult.success(val, successPrompt);
         } else {
             // Pause execution
             context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);
@@ -47,7 +62,12 @@ public class UserInputStepHandler implements StepHandler {
             metadata.put("stepName", step.getStepName());
             metadata.put("formConfig", transformUserInputConfig(uiConfig));
 
-            return StepResult.waiting("Waiting for input: " + step.getStepName(), metadata);
+            // Render the step message (the question) with current context variables
+            String prompt = (step.getMessage() != null && !step.getMessage().isEmpty()) 
+                ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
+                : "Waiting for input: " + step.getStepName();
+
+            return StepResult.waiting(prompt, metadata);
         }
     }
 

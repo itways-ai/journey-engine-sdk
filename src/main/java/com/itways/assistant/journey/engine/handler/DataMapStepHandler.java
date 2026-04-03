@@ -25,7 +25,11 @@ import lombok.RequiredArgsConstructor;
 @Component
 @RequiredArgsConstructor
 public class DataMapStepHandler implements StepHandler {
-	private static final String DEFAULT_FILL_SYSTEM_PROMPT = "You are a data mapping AI. Your goal is to fill a JSON template using information from the user's input (text and files). Follow the instructions strictly and return ONLY the resulting JSON.";
+	private static final String DEFAULT_FILL_SYSTEM_PROMPT = "You are a data mapping AI. Your goal is to fill a JSON template using information from the user's input. Return ONLY valid JSON, starting with { and ending with }. Do not add any conversational text before or after.";
+	// private static final String DEFAULT_FILL_SYSTEM_PROMPT = "You are a data
+	// mapping AI. Your goal is to fill a JSON template using information from the
+	// user's input (text and files). Follow the instructions strictly and return
+	// ONLY the resulting JSON.";
 
 	private final AiService aiService;
 	private final ObjectMapper objectMapper;
@@ -50,6 +54,7 @@ public class DataMapStepHandler implements StepHandler {
 
 			Map<String, Object> model = new HashMap<>();
 			model.put("userText", text);
+			model.put("executionContext", objectMapper.writeValueAsString(context.getVariables()));
 			model.put("jsonTemplate", action);
 			model.put("instructions", step.getRequiredParams());
 
@@ -100,20 +105,24 @@ public class DataMapStepHandler implements StepHandler {
 		String trimmed = content.trim();
 
 		// Check if wrapped in code blocks (```json or ``` at start)
+		// If it has markdown blocks, try to extract just the json part
 		if (trimmed.startsWith("```")) {
-			// Remove opening ```json or ```
 			int firstNewline = trimmed.indexOf('\n');
 			if (firstNewline > 0) {
 				trimmed = trimmed.substring(firstNewline + 1);
 			}
-
-			// Remove closing ```
-			if (trimmed.endsWith("```")) {
-				trimmed = trimmed.substring(0, trimmed.length() - 3);
+			int lastTicks = trimmed.lastIndexOf("```");
+			if (lastTicks > 0) {
+				trimmed = trimmed.substring(0, lastTicks);
 			}
-
-			// Trim again after removing markers
 			trimmed = trimmed.trim();
+		} else {
+			// Extract just the part between { and } if there is conversational text
+			int startInd = trimmed.indexOf('{');
+			int endInd = trimmed.lastIndexOf('}');
+			if (startInd >= 0 && endInd > startInd) {
+				trimmed = trimmed.substring(startInd, endInd + 1);
+			}
 		}
 
 		return trimmed;
