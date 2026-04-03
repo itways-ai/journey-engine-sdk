@@ -66,18 +66,22 @@ public class JourneyEngineImpl implements JourneyEngine {
         }
 
         List<JourneyStep> sortedSteps = sortSteps(steps);
-        int startIndex = context.getCurrentStepIndex();
 
-        for (JourneyStep step : sortedSteps) {
+        int i = 0;
+        while (i < sortedSteps.size() && context.getStatus() == ExecutionStatus.RUNNING) {
+            JourneyStep step = sortedSteps.get(i);
             int stepOrder = step.getStepOrder();
+            int startIndex = context.getCurrentStepIndex();
 
             // Skip already completed steps (Resumption logic)
             if (stepOrder <= startIndex) {
+                i++;
                 continue;
             }
 
             // check branch eligibility
             if (!isEligible(step, context)) {
+                i++;
                 continue;
             }
 
@@ -91,6 +95,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                     context.setStatus(ExecutionStatus.ERROR);
                     break;
                 }
+                i++;
                 continue;
             }
 
@@ -116,7 +121,15 @@ public class JourneyEngineImpl implements JourneyEngine {
                 }
                 stepResults.add(viewResult);
                 context.setCurrentStepIndex(stepOrder);
+                context.addStepResult(stepOrder, stepResult.getData());
+
+                String safeName = engineUtils
+                        .sanitizeKey(step.getStepName() != null ? step.getStepName() : ("step" + stepOrder));
+                context.setVariable(safeName, stepResult.getData());
+                
+                i++;
             } else if ("WAITING".equals(stepResult.getStatus())) {
+                viewResult.put("message", stepResult.getMessage());
                 viewResult.putAll(stepResult.getMetadata());
                 stepResults.add(viewResult);
                 // Pause execution
@@ -124,6 +137,36 @@ public class JourneyEngineImpl implements JourneyEngine {
                 result.put("stepResults", stepResults);
                 result.put("context", context);
                 return result;
+            } else if ("JUMP".equals(stepResult.getStatus())) {
+                int targetOrder = (Integer) stepResult.getMetadata().get("targetOrder");
+                
+                // Clear `stepResults` sequencing >= targetOrder
+                List<Integer> ordersToRemove = new java.util.ArrayList<>(context.getStepResults().keySet());
+                for (Integer order : ordersToRemove) {
+                    if (order >= targetOrder) {
+                         context.getStepResults().remove(order);
+                    }
+                }
+                
+                // Keep variables alive if they were also created by a step < targetOrder
+                java.util.Set<String> safeNamesToKeep = steps.stream()
+                        .filter(s -> s.getStepOrder() < targetOrder)
+                        .map(s -> engineUtils.sanitizeKey(s.getStepName() != null ? s.getStepName() : ("step" + s.getStepOrder())))
+                        .collect(java.util.stream.Collectors.toSet());
+
+                for (JourneyStep s : steps) {
+                    if (s.getStepOrder() >= targetOrder) {
+                         String name = engineUtils.sanitizeKey(s.getStepName() != null ? s.getStepName() : ("step" + s.getStepOrder()));
+                         if (!safeNamesToKeep.contains(name)) {
+                              context.getVariables().remove(name);
+                         }
+                    }
+                }
+                context.getVariables().keySet().removeIf(k -> k.startsWith("step") && ordersToRemove.stream().anyMatch(o -> o >= targetOrder && k.equals("step" + o)));
+                
+                context.setCurrentStepIndex(targetOrder - 1);
+                i = 0; // Reset loop to run from start
+                continue;
             } else {
                 viewResult.put("message", stepResult.getMessage());
                 stepResults.add(viewResult);
@@ -141,6 +184,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                     context.setStatus(ExecutionStatus.ERROR);
                     break;
                 }
+                i++;
             }
         }
 
@@ -155,8 +199,8 @@ public class JourneyEngineImpl implements JourneyEngine {
         result.put("context", context);
 
         // Final message extraction (last success message)
-        for (int i = stepResults.size() - 1; i >= 0; i--) {
-            Map<String, Object> r = stepResults.get(i);
+        for (int idx = stepResults.size() - 1; idx >= 0; idx--) {
+            Map<String, Object> r = stepResults.get(idx);
             if ("SUCCESS".equals(r.get("status")) && r.containsKey("message") && r.get("message") != null) {
                 result.put("message", r.get("message"));
                 break;
