@@ -1,26 +1,16 @@
 package com.itways.assistant.journey.engine.impl;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
-import org.springframework.stereotype.Service;
-
-import com.itways.assistant.journey.engine.model.ExecutionContext;
-import com.itways.assistant.journey.engine.model.ExecutionStatus;
-import com.itways.assistant.journey.engine.model.Journey;
-import com.itways.assistant.journey.engine.model.JourneyStep;
-import com.itways.assistant.journey.engine.model.StepResult;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.JourneyEngine;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.service.StepHandlerRegistry;
 import com.itways.assistant.journey.engine.util.EngineUtils;
-
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+import java.util.*;
 
 @Slf4j
 @Service
@@ -38,6 +28,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                 .currentStepIndex(-1)
                 .status(ExecutionStatus.RUNNING)
                 .variables(new HashMap<>(initialParams))
+                .startedAt(new Date())
                 .build();
 
         return execute(journey, context);
@@ -99,6 +90,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                 continue;
             }
 
+            long stepStart = System.currentTimeMillis();
             StepResult stepResult;
             try {
                 stepResult = handler.execute(step, context);
@@ -106,6 +98,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                 log.error("Unhandled exception in handler for type: {}", step.getActionType(), e);
                 stepResult = StepResult.error("Internal Handler Error: " + e.getMessage());
             }
+            long stepEnd = System.currentTimeMillis();
 
             Map<String, Object> viewResult = new HashMap<>();
             viewResult.put("type", step.getActionType());
@@ -113,11 +106,17 @@ public class JourneyEngineImpl implements JourneyEngine {
             viewResult.put("stepName", step.getStepName());
             viewResult.put("clientVisible", step.isClientVisible());
             viewResult.put("status", stepResult.getStatus());
+            viewResult.put("startedAt", new Date(stepStart));
+            viewResult.put("completedAt", new Date(stepEnd));
+            viewResult.put("durationMs", stepEnd - stepStart);
 
             if ("SUCCESS".equals(stepResult.getStatus())) {
                 viewResult.put("message", stepResult.getMessage());
                 if (stepResult.getData() != null) {
                     viewResult.put("data", stepResult.getData());
+                    try {
+                        viewResult.put("outputPayload", new ObjectMapper().writeValueAsString(stepResult.getData()));
+                    } catch(Exception ignored){}
                 }
                 stepResults.add(viewResult);
                 context.setCurrentStepIndex(stepOrder);
