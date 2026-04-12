@@ -46,7 +46,25 @@ public class UserInputStepHandler implements StepHandler {
             if (!context.getVariables().containsKey(safeName)) {
                 context.getVariables().put(safeName, val);
             }
-            // Clean up to avoid it being reused by another UserInput in the same turn
+
+            // --- INTERACTIVE MODE LOGIC ---
+            if ("INTERACTIVE".equalsIgnoreCase(uiConfig.getInputMode()) && val instanceof String) {
+                // Mock AI Logic: In a real scenario, we'd call an LLM here to parse fields.
+                // If the value is a String, it means we got capture text, not a form submit.
+                
+                // Let's check if we've already done the interactive confirmation
+                if (!context.getVariables().containsKey(safeName + "_confirmed")) {
+                    context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);
+                    Map<String, Object> metadata = prepareMetadata(step, uiConfig);
+                    metadata.put("subStatus", "CONFIRMATION_REQUIRED");
+                    metadata.put("parsedData", val); // In real: pre-filled fields
+                    
+                    String prompt = "I've analyzed your input. Please verify the details below to ensure neural accuracy.";
+                    return StepResult.waiting(prompt, metadata);
+                }
+            }
+            
+            // Clean up
             context.getVariables().remove("userInputAnswer");
 
             String successPrompt = (step.getMessage() != null && !step.getMessage().isEmpty()) 
@@ -58,9 +76,12 @@ public class UserInputStepHandler implements StepHandler {
             // Pause execution
             context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);
 
-            Map<String, Object> metadata = new HashMap<>();
-            metadata.put("stepName", step.getStepName());
-            metadata.put("formConfig", transformUserInputConfig(uiConfig));
+            Map<String, Object> metadata = prepareMetadata(step, uiConfig);
+            
+            // If mode is STRUCTURED, we tell the frontend to show the form immediately
+            if ("STRUCTURED".equalsIgnoreCase(uiConfig.getInputMode())) {
+                metadata.put("subStatus", "DIRECT_FORM");
+            }
 
             // Render the step message (the question) with current context variables
             String prompt = (step.getMessage() != null && !step.getMessage().isEmpty()) 
@@ -69,6 +90,18 @@ public class UserInputStepHandler implements StepHandler {
 
             return StepResult.waiting(prompt, metadata);
         }
+    }
+
+    private Map<String, Object> prepareMetadata(JourneyStep step, ApiConfig uiConfig) {
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("stepName", step.getStepName());
+        metadata.put("inputMode", uiConfig.getInputMode());
+        metadata.put("formConfig", Map.of(
+            "fields", uiConfig.getFields() != null ? uiConfig.getFields() : new Object[]{},
+            "rules", uiConfig.getRules() != null ? uiConfig.getRules() : new Object[]{}
+        ));
+        metadata.put("allowResubmit", uiConfig.isAllowResubmit());
+        return metadata;
     }
 
     private ApiConfig loadApiConfig(String json) {
@@ -81,9 +114,5 @@ public class UserInputStepHandler implements StepHandler {
         }
     }
 
-    private Map<String, Object> transformUserInputConfig(ApiConfig config) {
-        Map<String, Object> map = new HashMap<>();
-        map.put("allowResubmit", config.isAllowResubmit());
-        return map;
-    }
+
 }

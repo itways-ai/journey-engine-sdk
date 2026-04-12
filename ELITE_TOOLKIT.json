@@ -1,0 +1,80 @@
+{
+  "API_ENGINE": {
+    "method": "POST",
+    "headers": { "Authorization": "Bearer {{api_key}}" },
+    "queryParams": { "version": "v1" },
+    "body": { "input": "{{step_result}}" }
+  },
+  "CONDITION_LOGIC": {
+    "expression": "context.variables.user_age > 18"
+  },
+  "SWITCH_LOGIC": {
+    "expression": "context.variables.plan_type",
+    "cases": {
+      "premium": "STEP_VIP_FLOW",
+      "basic": "STEP_STANDARD_FLOW"
+    }
+  },
+  "TEMPLATE_RENDERER": {
+    "template": "Hello {{user_name}}, welcome to {{brand}}!",
+    "format": "HTML"
+  },
+  "KNOWLEDGE_RETRIEVAL": {
+    "indexName": "product-manual-v2",
+    "query": "{{user_question}}",
+    "limit": 3,
+    "threshold": 0.75
+  },
+  "DOCUMENT_INSIGHT": {
+    "strategy": "FINANCIAL_OCR",
+    "autoExtract": true,
+    "languageHint": "en",
+    "pages": "1-2"
+  },
+  "USER_INPUT": {
+    "inputMode": "INTERACTIVE",
+    "fields": [
+      { "name": "email", "type": "EMAIL", "required": true },
+      { "name": "urgency", "type": "SELECT", "options": ["Low", "High"] }
+    ]
+  },
+  "HUMAN_APPROVAL": {
+    "stakeholders": "admin@itways.ai",
+    "instruction": "Please verify the discount amount of {{discount}}%",
+    "timeout": 3600
+  },
+  "STATE_MANAGER": {
+    "variable": "is_returning_user",
+    "operation": "SET",
+    "source": "TRUE"
+  },
+  "SEND_MAIL": {
+    "to": "{{user_email}}",
+    "subject": "Verification Code: {{otp}}",
+    "content": "Your code is {{otp}}. It expires in 5 minutes."
+  },
+  "DELAY": {
+    "duration": 5,
+    "unit": "MINUTES"
+  },
+  "LOOP_JUMP": {
+    "targetStepName": "START_VALIDATION"
+  },
+  "TRIGGER_INTENT": {
+    "targetIntent": "CUSTOMER_SUPPORT_ESC",
+    "payload": { "reason": "High urgency detected" }
+  },
+  "REDIRECT": {
+    "url": "https://nexus.ai/dashboard/{{project_id}}",
+    "target": "_self"
+  },
+  "RESPONSE_MESSAGE": {
+    "message": "Transmission received. Processing your request..."
+  },
+  "DATA_MAPPING": {
+    "mappings": {
+      "full_name": "context.variables.first_name + ' ' + context.variables.last_name",
+      "timestamp": "new Date().toISOString()"
+    }
+  }
+}
