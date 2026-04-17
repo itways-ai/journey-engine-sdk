@@ -13,7 +13,7 @@ import java.util.regex.Pattern;
 public class EngineUtils {
 
     private final ExpressionParser parser = new SpelExpressionParser();
-    private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\{([a-zA-Z0-9_\\.]+)\\}");
+    private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\{\\{([a-zA-Z0-9_\\.]+)\\}\\}|\\{([a-zA-Z0-9_\\.]+)\\}");
 
     public Object evaluateExpression(String expression, Map<String, Object> context) {
         if (expression == null || expression.isEmpty()) {
@@ -21,7 +21,9 @@ public class EngineUtils {
         }
         try {
             String clean = expression.trim();
-            if (clean.startsWith("{") && clean.endsWith("}")) {
+            if (clean.startsWith("{{") && clean.endsWith("}}")) {
+                clean = clean.substring(2, clean.length() - 2);
+            } else if (clean.startsWith("{") && clean.endsWith("}")) {
                 clean = clean.substring(1, clean.length() - 1);
             }
             StandardEvaluationContext evalContext = new StandardEvaluationContext(context);
@@ -44,10 +46,11 @@ public class EngineUtils {
         String result = text;
         Matcher matcher = PLACEHOLDER_PATTERN.matcher(text);
         while (matcher.find()) {
-            String key = matcher.group(1);
+            String fullMatch = matcher.group(0);
+            String key = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
             Object val = resolveValue(key, context);
             String strVal = (val != null) ? val.toString() : "null";
-            result = result.replace("{" + key + "}", strVal);
+            result = result.replace(fullMatch, strVal);
         }
         return result;
     }

@@ -1,6 +1,6 @@
-# 💠 Nixtio Journey Architect: Elite Module Blueprint
+# 💠 Storm Journey Architect: Elite Module Blueprint
 
-Welcome to the definitive guide for **Nixtio Journey Architect**. This document is designed for business architects, automation specialists, and visionary leaders who want to build high-intelligence AI workflows without getting lost in the code.
+Welcome to the definitive guide for **Storm Journey Architect**. This document is designed for business architects, automation specialists, and visionary leaders who want to build high-intelligence AI workflows without getting lost in the code.
 
 Each module below represents a "Neural Block" that you can drop into your journey to add specific logic, intelligence, or interaction capabilities.
 
@@ -211,4 +211,4 @@ Each module below represents a "Neural Block" that you can drop into your journe
 
 ---
 
-*Nixtio Journey Architect - Building the Autonomic Future.*
+*Storm Journey Architect - Building the Autonomic Future.*

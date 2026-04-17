@@ -1,6 +1,6 @@
-# 💎 Nixtio Elite AI Modules - Documentation
+# 💎 Storm Elite AI Modules - Documentation
 
-This guide provides a detailed technical breakdown of the 6 specialized "Elite" modules integrated into the Nixtio Orchestration Engine. These modules enable agentic workflows, long-running processes, and deep intelligence integration.
+This guide provides a detailed technical breakdown of the 6 specialized "Elite" modules integrated into the Storm Orchestration Engine. These modules enable agentic workflows, long-running processes, and deep intelligence integration.
 
 ---
 

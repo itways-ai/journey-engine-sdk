@@ -56,4 +56,11 @@ public class ApiConfig {
     private Boolean autoExtract;
     private String languageHint;
     private String pages;
+
+    // Discovery UI Persistence
+    private String configMode;
+    private String swaggerUrl;
+    private String pasteDocs;
+    private Object discoveredEndpoints;
+    private Object discoveredVariables;
 }
