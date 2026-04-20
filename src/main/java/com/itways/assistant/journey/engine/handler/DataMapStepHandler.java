@@ -4,6 +4,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import com.itways.assistant.journey.engine.service.AiConfigProvider;
 import org.springframework.stereotype.Component;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,7 +36,9 @@ public class DataMapStepHandler implements StepHandler {
 	private final ObjectMapper objectMapper;
 	private final EngineUtils engineUtils;
 	private final TemplateRender templateRender;
-	private final AiRequestConfig aiRequestConfig;
+//	private final AiRequestConfig aiRequestConfig;
+	private final AiConfigProvider aiConfigProvider;
+
 
 	@Override
 	public String getType() {
@@ -63,6 +66,9 @@ public class DataMapStepHandler implements StepHandler {
 			@SuppressWarnings("unchecked")
 			List<com.itways.assistant.ai.dto.AiWrappedFile> files = (List<com.itways.assistant.ai.dto.AiWrappedFile>) context
 					.getVariable("files");
+
+			// get the configuration from the provider
+			AiRequestConfig aiRequestConfig = aiConfigProvider.getConfig(context.getAccountId());
 
 			AiChatRequest chatRequest = AiChatRequest.builder()
 					.messages(List.of(AiMessage.system(DEFAULT_FILL_SYSTEM_PROMPT), AiMessage.user(userPrompt)))
