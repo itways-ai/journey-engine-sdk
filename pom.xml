@@ -45,27 +45,18 @@
         
 		
 		<dependency>
-			<groupId>com.itways.assistant</groupId>
+			<groupId>com.github.itways-ai</groupId>
 			<artifactId>ai-engine-sdk</artifactId>
-			<version>1.0.0</version>
+			<version>v1.0.0</version>
 		</dependency>
     </dependencies>
 
     <repositories>
         <repository>
-            <id>github</id>
-            <name>GitHub Packages</name>
-            <url>https://maven.pkg.github.com/itways-ai/ai-engine-sdk</url>
+            <id>jitpack.io</id>
+            <url>https://jitpack.io</url>
         </repository>
     </repositories>
-
-    <distributionManagement>
-        <repository>
-            <id>github</id>
-            <name>GitHub Packages</name>
-            <url>https://maven.pkg.github.com/itways-ai/journey-engine-sdk</url>
-        </repository>
-    </distributionManagement>
 
     <build>
         <plugins>
