@@ -1,31 +1,46 @@
 package com.itways.assistant.journey.engine.handler;
 
-import java.util.Map;
-import org.springframework.stereotype.Component;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.ai.dto.AiChatRequest;
+import com.itways.assistant.ai.dto.AiEmbeddingRequest;
+import com.itways.assistant.ai.dto.AiEmbeddingResponse;
 import com.itways.assistant.ai.dto.AiMessage;
+import com.itways.assistant.ai.dto.AiRequestConfig;
 import com.itways.assistant.ai.dto.AiResponse;
 import com.itways.assistant.ai.service.AiService;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
 import com.itways.assistant.journey.engine.model.StepResult;
+import com.itways.assistant.journey.engine.service.AiConfigProvider;
+import com.itways.assistant.journey.engine.service.KnowledgeBasePort;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
 import java.util.List;
-import java.util.ArrayList;
 
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class KnowledgeRetrievalStepHandler implements StepHandler {
 
-    private final EngineUtils engineUtils;
-    private final ObjectMapper objectMapper;
-    private final AiService aiService;
+    private static final int    DEFAULT_LIMIT     = 5;
+    private static final double DEFAULT_THRESHOLD = 0.70;
+
+    private static final String SYNTHESIS_SYSTEM_PROMPT =
+            "You are a Knowledge Assistant. You have been given relevant excerpts from a knowledge base. " +
+            "Use ONLY the provided excerpts to answer the user's question. " +
+            "If the excerpts do not contain enough information to answer, say so clearly. " +
+            "Do not make up information.";
+
+    private final EngineUtils        engineUtils;
+    private final ObjectMapper       objectMapper;
+    private final AiService          aiService;
+    private final AiConfigProvider   aiConfigProvider;
+    private final KnowledgeBasePort  knowledgeBasePort;
 
     @Override
     public String getType() {
@@ -36,28 +51,92 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         try {
             ApiConfig config = loadApiConfig(step.getApiConfig());
-            String query = engineUtils.replacePlaceholders(config.getQuery() != null ? config.getQuery() : "", context.getVariables());
-            
-            log.info("🔍 Knowledge Retrieval Step: '{}' with query: {}", step.getStepName(), query);
 
-            // Construct RAG System Prompt
-            List<AiMessage> messages = new ArrayList<>();
-            messages.add(new AiMessage("system", "You are a Knowledge Retrieval Specialist. Find relevant information for the following query and return it as a concise summary. Query: " + query));
-            
-            AiChatRequest chatRequest = new AiChatRequest();
-            chatRequest.setMessages(messages);
-            
-            AiResponse aiResponse = aiService.chat(chatRequest);
-            String resultText = aiResponse.getContent();
+            // 1. Resolve the query — supports {{placeholder}} syntax
+            String query = engineUtils.replacePlaceholders(
+                    config.getQuery() != null ? config.getQuery() : "",
+                    context.getVariables());
 
-            context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), resultText);
-            context.setVariable("retrieved_knowledge", resultText);
-            
-            return StepResult.success(resultText, step.getMessage());
+            if (query.isBlank()) {
+                return StepResult.error("KNOWLEDGE_RETRIEVAL: query is empty");
+            }
+
+            String indexName = config.getIndexName();
+            if (indexName == null || indexName.isBlank()) {
+                return StepResult.error("KNOWLEDGE_RETRIEVAL: indexName is required");
+            }
+
+            int    limit     = config.getLimit()     != null ? config.getLimit()     : DEFAULT_LIMIT;
+            double threshold = config.getThreshold() != null ? config.getThreshold() : DEFAULT_THRESHOLD;
+
+            log.info("🔍 Knowledge Retrieval: index='{}', query='{}', limit={}, threshold={}",
+                    indexName, query, limit, threshold);
+
+            // 2. Get AI config for this account (provider + apiKey)
+            AiRequestConfig aiConfig = aiConfigProvider.getConfig(context.getAccountId());
+
+            // 3. Embed the query
+            AiEmbeddingRequest embeddingRequest = AiEmbeddingRequest.builder()
+                    .input(query)
+                    .config(aiConfig)
+                    .build();
+
+            AiEmbeddingResponse embeddingResponse = aiService.embed(embeddingRequest);
+            float[] queryVector = embeddingResponse.getVector();
+
+            log.info("✅ Query embedded, dimensions: {}", queryVector.length);
+
+            // 4. Vector search via port (implemented in journey-service)
+            List<String> chunks = knowledgeBasePort.search(
+                    context.getAccountId(), indexName, queryVector, limit, threshold);
+
+            if (chunks.isEmpty()) {
+                log.warn("⚠️ No matching chunks found for query: '{}'", query);
+                String noResultMsg = "No relevant information found in the knowledge base for: " + query;
+                context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), noResultMsg);
+                context.setVariable("retrieved_knowledge", noResultMsg);
+                return StepResult.success(noResultMsg, step.getMessage());
+            }
+
+            log.info("✅ Retrieved {} chunks from knowledge base", chunks.size());
+
+            // 5. Store raw chunks in context for downstream steps
+            context.setVariable("retrieved_chunks", chunks);
+
+            // 6. Synthesize a natural language answer using the LLM
+            String chunksContext = buildChunksContext(chunks);
+            String userPrompt    = "Knowledge Base Excerpts:\n" + chunksContext +
+                                   "\n\nUser Question: " + query;
+
+            AiChatRequest chatRequest = AiChatRequest.builder()
+                    .messages(List.of(
+                            AiMessage.system(SYNTHESIS_SYSTEM_PROMPT),
+                            AiMessage.user(userPrompt)))
+                    .config(aiConfig)
+                    .build();
+
+            AiResponse synthesisResponse = aiService.chat(chatRequest);
+            String answer = synthesisResponse.getContent();
+
+            // 7. Store result in context
+            context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), answer);
+            context.setVariable("retrieved_knowledge", answer);
+
+            log.info("✅ Knowledge Retrieval complete for step '{}'", step.getStepName());
+            return StepResult.success(answer, step.getMessage());
+
         } catch (Exception e) {
             log.error("❌ Knowledge Retrieval failed", e);
-            return StepResult.error("RAG Failure: " + e.getMessage());
+            return StepResult.error("Knowledge Retrieval failed: " + e.getMessage());
         }
+    }
+
+    private String buildChunksContext(List<String> chunks) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < chunks.size(); i++) {
+            sb.append("[").append(i + 1).append("] ").append(chunks.get(i)).append("\n");
+        }
+        return sb.toString();
     }
 
     private ApiConfig loadApiConfig(String json) {
