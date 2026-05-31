@@ -15,8 +15,6 @@ public class Journey {
     private Long id;
     private String name;
     private String triggerIntent;
-    private String variableMapping;
-    private String aiHints;
     private String slug;
     private String uniqueCode;
     private boolean active;
