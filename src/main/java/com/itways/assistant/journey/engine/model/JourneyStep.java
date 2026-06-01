@@ -1,5 +1,7 @@
 package com.itways.assistant.journey.engine.model;
 
+import java.util.List;
+
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -38,6 +40,7 @@ public class JourneyStep {
     private String conditionExpression;
     private String branchName;
     private Integer parentOrder;
+    private List<Integer> parentOrders;
     private String message;
     @Builder.Default
     private Boolean clientVisible = true; // Visibility in Chat UI
