@@ -209,62 +209,99 @@ public class JourneyEngineImpl implements JourneyEngine {
         return result;
     }
 
+    private List<Integer> resolveInboundParents(JourneyStep step) {
+        if (step.getParentOrders() != null && !step.getParentOrders().isEmpty()) {
+            return step.getParentOrders();
+        }
+        if (step.getParentOrder() != null && step.getParentOrder() > 0) {
+            return List.of(step.getParentOrder());
+        }
+        return Collections.emptyList();
+    }
+
+    private boolean isRejoinStep(JourneyStep step) {
+        return step.getParentOrders() != null && !step.getParentOrders().isEmpty();
+    }
+
     private List<JourneyStep> sortSteps(List<JourneyStep> steps) {
-        // Simple sorting by order for now, actual implementation might need DAG
-        // traversal if steps are not strictly sequential
-        // Based on JourneyExecutor's DFS:
-        Map<Integer, List<Integer>> adj = new HashMap<>();
         Map<Integer, JourneyStep> stepMap = new HashMap<>();
+        Map<Integer, List<Integer>> adj = new HashMap<>();
+        Map<Integer, Integer> inDegree = new HashMap<>();
+
         for (JourneyStep s : steps) {
             stepMap.put(s.getStepOrder(), s);
-            if (s.getParentOrder() != null && s.getParentOrder() > 0) {
-                adj.computeIfAbsent(s.getParentOrder(), k -> new ArrayList<>()).add(s.getStepOrder());
+            inDegree.put(s.getStepOrder(), 0);
+        }
+
+        for (JourneyStep s : steps) {
+            for (Integer parent : resolveInboundParents(s)) {
+                if (parent == null || parent <= 0 || !stepMap.containsKey(parent)) {
+                    continue;
+                }
+                adj.computeIfAbsent(parent, k -> new ArrayList<>()).add(s.getStepOrder());
+                inDegree.merge(s.getStepOrder(), 1, Integer::sum);
             }
         }
 
-        List<Integer> sortedIndices = new ArrayList<>();
-        Set<Integer> visited = new HashSet<>();
+        Queue<Integer> queue = new LinkedList<>();
         for (JourneyStep s : steps) {
-            if (s.getParentOrder() == null || s.getParentOrder() == 0) {
-                if (!visited.contains(s.getStepOrder())) {
-                    dfs(s.getStepOrder(), adj, sortedIndices, visited);
+            if (inDegree.getOrDefault(s.getStepOrder(), 0) == 0) {
+                queue.add(s.getStepOrder());
+            }
+        }
+
+        List<Integer> sortedOrders = new ArrayList<>();
+        while (!queue.isEmpty()) {
+            int node = queue.poll();
+            sortedOrders.add(node);
+            for (int child : adj.getOrDefault(node, Collections.emptyList())) {
+                int deg = inDegree.merge(child, -1, Integer::sum);
+                if (deg == 0) {
+                    queue.add(child);
                 }
             }
         }
 
+        for (JourneyStep s : steps) {
+            if (!sortedOrders.contains(s.getStepOrder())) {
+                sortedOrders.add(s.getStepOrder());
+            }
+        }
+
         List<JourneyStep> result = new ArrayList<>();
-        for (int i : sortedIndices) {
-            result.add(stepMap.get(i));
+        for (int order : sortedOrders) {
+            result.add(stepMap.get(order));
         }
         return result;
     }
 
-    private void dfs(int current, Map<Integer, List<Integer>> adj, List<Integer> sorted, Set<Integer> visited) {
-        visited.add(current);
-        sorted.add(current);
-        List<Integer> children = adj.get(current);
-        if (children != null) {
-            for (int child : children) {
-                if (!visited.contains(child))
-                    dfs(child, adj, sorted, visited);
-            }
-        }
-    }
-
     private boolean isEligible(JourneyStep step, ExecutionContext context) {
-        if (step.getParentOrder() == null || step.getParentOrder() == 0) {
+        List<Integer> inbound = resolveInboundParents(step);
+        if (inbound.isEmpty()) {
             return true;
         }
 
-        Object parentResult = context.getStepResults().get(step.getParentOrder());
-
-        if (parentResult == null)
+        if (isRejoinStep(step)) {
+            for (Integer parent : inbound) {
+                if (context.getStepResults().get(parent) != null) {
+                    return true;
+                }
+            }
             return false;
+        }
+
+        Integer parentOrder = inbound.get(0);
+        Object parentResult = context.getStepResults().get(parentOrder);
+
+        if (parentResult == null) {
+            return false;
+        }
 
         String requiredBranch = step.getBranchName();
 
-        if (requiredBranch == null)
+        if (requiredBranch == null) {
             return true;
+        }
 
         if (parentResult instanceof Boolean) {
             boolean boolResult = (Boolean) parentResult;
@@ -272,8 +309,6 @@ public class JourneyEngineImpl implements JourneyEngine {
                     || (requiredBranch.equalsIgnoreCase("false") && !boolResult);
         } else {
             String parentValStr = String.valueOf(parentResult);
-            // Default branch logic would need more info about siblings,
-            // but for now we follow the existing pattern:
             return requiredBranch.equalsIgnoreCase(parentValStr) || "DEFAULT".equalsIgnoreCase(requiredBranch);
         }
     }
