@@ -52,10 +52,14 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
         try {
             ApiConfig config = loadApiConfig(step.getApiConfig());
 
-            // 1. Resolve the query — supports {{placeholder}} syntax
-            String query = engineUtils.replacePlaceholders(
-                    config.getQuery() != null ? config.getQuery() : "",
-                    context.getVariables());
+            // 1. Query = user's message (context variable "text").
+            //    Optionally overridable via apiConfig.query with {{placeholder}} syntax,
+            //    but for standard FAQ flows the user's input IS the query.
+            String rawQuery = (config.getQuery() != null && !config.getQuery().isBlank())
+                    ? config.getQuery()
+                    : "{{text}}";
+
+            String query = engineUtils.replacePlaceholders(rawQuery, context.getVariables());
 
             if (query.isBlank()) {
                 return StepResult.error("KNOWLEDGE_RETRIEVAL: query is empty");
@@ -100,30 +104,39 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
 
             log.info("✅ Retrieved {} chunks from knowledge base", chunks.size());
 
-            // 5. Store raw chunks in context for downstream steps
-            context.setVariable("retrieved_chunks", chunks);
+//            // 5. Store raw chunks in context for downstream steps
+//            context.setVariable("retrieved_chunks", chunks);
+//
+//            // 6. Synthesize a natural language answer using the LLM
+//            String chunksContext = buildChunksContext(chunks);
+//            String userPrompt    = "Knowledge Base Answers:\n" + chunksContext +
+//                                   "\n\nUser Question: " + query;
+//
+//            AiChatRequest chatRequest = AiChatRequest.builder()
+//                    .messages(List.of(
+//                            AiMessage.system(SYNTHESIS_SYSTEM_PROMPT),
+//                            AiMessage.user(userPrompt)))
+//                    .config(aiConfig)
+//                    .build();
+//
+//            AiResponse synthesisResponse = aiService.chat(chatRequest);
+//            String answer = synthesisResponse.getContent();
+//
+//            // 7. Store result in context
+//            context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), answer);
+//            context.setVariable("retrieved_knowledge", answer);
+//
+//            log.info("✅ Knowledge Retrieval complete for step '{}'", step.getStepName());
+//            return StepResult.success(answer, step.getMessage());
+            // the first item in chunks is already the best exact answer
+            String  bestAnswer = chunks.get(0);
 
-            // 6. Synthesize a natural language answer using the LLM
-            String chunksContext = buildChunksContext(chunks);
-            String userPrompt    = "Knowledge Base Excerpts:\n" + chunksContext +
-                                   "\n\nUser Question: " + query;
+            // 5. store result in context directly (NO AI CHAT CALL)
+            context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), bestAnswer);
+            context.setVariable("retrieved_knowledge", bestAnswer);
 
-            AiChatRequest chatRequest = AiChatRequest.builder()
-                    .messages(List.of(
-                            AiMessage.system(SYNTHESIS_SYSTEM_PROMPT),
-                            AiMessage.user(userPrompt)))
-                    .config(aiConfig)
-                    .build();
-
-            AiResponse synthesisResponse = aiService.chat(chatRequest);
-            String answer = synthesisResponse.getContent();
-
-            // 7. Store result in context
-            context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), answer);
-            context.setVariable("retrieved_knowledge", answer);
-
-            log.info("✅ Knowledge Retrieval complete for step '{}'", step.getStepName());
-            return StepResult.success(answer, step.getMessage());
+            log.info("✅ Knowledge Retrieval complete (Direct Answer). Bypassed LLM generation.");
+            return  StepResult.success(bestAnswer, step.getMessage());
 
         } catch (Exception e) {
             log.error("❌ Knowledge Retrieval failed", e);
