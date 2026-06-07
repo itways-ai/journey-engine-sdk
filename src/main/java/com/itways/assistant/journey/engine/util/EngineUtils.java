@@ -13,7 +13,7 @@ import java.util.regex.Pattern;
 public class EngineUtils {
 
     private final ExpressionParser parser = new SpelExpressionParser();
-    private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\{\\{([a-zA-Z0-9_\\.]+)\\}\\}|\\{([a-zA-Z0-9_\\.]+)\\}");
+    private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\{\\{([a-zA-Z0-9_\\.]+)\\}\\}|\\{([a-zA-Z0-9_\\.]+)\\}|<%([a-zA-Z0-9_\\.]+)%>");
 
     public Object evaluateExpression(String expression, Map<String, Object> context) {
         if (expression == null || expression.isEmpty()) {
@@ -40,14 +40,16 @@ public class EngineUtils {
     }
 
     public String replacePlaceholders(String text, Map<String, Object> context) {
-        if (text == null || !text.contains("{")) {
+        if (text == null || (!text.contains("{") && !text.contains("<%"))) {
             return text;
         }
         String result = text;
         Matcher matcher = PLACEHOLDER_PATTERN.matcher(text);
         while (matcher.find()) {
             String fullMatch = matcher.group(0);
-            String key = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
+            String key = matcher.group(1) != null ? matcher.group(1)
+                       : matcher.group(2) != null ? matcher.group(2)
+                       : matcher.group(3);
             Object val = resolveValue(key, context);
             String strVal = (val != null) ? val.toString() : "null";
             result = result.replace(fullMatch, strVal);

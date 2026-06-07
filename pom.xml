@@ -42,12 +42,17 @@
             <artifactId>jackson-databind</artifactId>
             <version>2.15.3</version>
         </dependency>
-        
+
+<!--        <dependency>-->
+<!--            <groupId>com.github.itways-ai</groupId>-->
+<!--            <artifactId>ai-engine-sdk</artifactId>-->
+<!--            <version>v1.0.1</version>-->
+<!--        </dependency>-->
 		
 		<dependency>
-			<groupId>com.github.itways-ai</groupId>
+			<groupId>com.itways.assistant</groupId>
 			<artifactId>ai-engine-sdk</artifactId>
-			<version>v1.0.1</version>
+			<version>1.0.1</version>
 		</dependency>
     </dependencies>
 
