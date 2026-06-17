@@ -1,17 +1,8 @@
 package com.itways.assistant.journey.engine.handler;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.itways.assistant.ai.dto.AiChatRequest;
-import com.itways.assistant.ai.dto.AiMessage;
-import com.itways.assistant.ai.dto.AiRequestConfig;
-import com.itways.assistant.ai.dto.AiResponse;
-import com.itways.assistant.ai.service.AiService;
 import com.itways.assistant.ai.service.impl.LocalEmbeddingEngine;
-import com.itways.assistant.journey.engine.model.ApiConfig;
-import com.itways.assistant.journey.engine.model.ExecutionContext;
-import com.itways.assistant.journey.engine.model.JourneyStep;
-import com.itways.assistant.journey.engine.model.StepResult;
-import com.itways.assistant.journey.engine.service.AiConfigProvider;
+import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.KnowledgeBasePort;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
@@ -27,7 +18,9 @@ import java.util.List;
 public class KnowledgeRetrievalStepHandler implements StepHandler {
 
     private static final int    DEFAULT_LIMIT     = 5;
-    private static final double DEFAULT_THRESHOLD = 0.72;
+    private static final double MIN_ABSOLUTE_THRESHOLD = 0.50;
+    private static final double MIN_RELATIVE_GAP       = 0.007;
+
 //    private static final String SYNTHESIS_SYSTEM_PROMPT =
 //            "You are a Knowledge Assistant. You have been given relevant excerpts from a knowledge base. " +
 //            "Use ONLY the provided excerpts to answer the user's question. " +
@@ -69,41 +62,79 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             }
 
             int    limit     = config.getLimit()     != null ? config.getLimit()     : DEFAULT_LIMIT;
-            double threshold = config.getThreshold() != null ? config.getThreshold() : DEFAULT_THRESHOLD;
 
-            log.info("🔍 Knowledge Retrieval: index='{}', query='{}', limit={}, threshold={}",
-                    indexName, query, limit, threshold);
+            log.info("🔍 Knowledge Scored Retrieval: index='{}', query='{}'", indexName, query);
 
             float[] queryVector = embeddingEngine.embed(query);
-            log.info("✅ Query embedded, dimensions: {}", queryVector.length);
 
             // Vector search via port (implemented in journey-service)
-            List<String> chunks = knowledgeBasePort.search(
-                    accountId, indexName, queryVector, limit, threshold);
+            List<EngineSearchResult> results = knowledgeBasePort.search(
+                    accountId, indexName, queryVector, limit);
 
-            if (chunks.isEmpty()) {
-                log.warn("⚠️ No relevant database context found for query: '{}'", query);
-                String fallbackMsg = "I don't have information about this.";
-                context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), fallbackMsg);
-                context.setVariable("retrieved_knowledge", fallbackMsg);
-                return StepResult.success(fallbackMsg, step.getMessage());
+            String fallbackMsg = "I don't have information about this.";
+
+            if (results.isEmpty()) {
+                log.warn("⚠️ Database query returned 0 rows for index: '{}'", indexName);
+                return triggerFallback(step,context,fallbackMsg);
             }
 
-            log.info("✅ Retrieved {} chunks from knowledge base", chunks.size());
+            EngineSearchResult bestMatch = results.get(0);
+            log.info("🎯 Evaluated top match score: {} | Text: '{}'", bestMatch.similarity(), bestMatch.answer());
 
-            String  bestAnswer = chunks.get(0);
+            double bestScore = bestMatch.similarity();
+            double secondScore = results.size() > 1 ? results.get(1).similarity() : 0.0;
+            double actualGap = bestScore - secondScore;
+
+            log.info(
+                    "Top score={}, Second score={}, Gap={}",
+                    bestScore,
+                    secondScore,
+                    actualGap
+            );
+
+            log.info("📊 Confidence gap check -> Best: {}, Second: {}, Computed Gap: {}", bestScore, secondScore, actualGap);
+
+            if(bestMatch.similarity() < MIN_ABSOLUTE_THRESHOLD) {
+                log.warn("❌ Top score {} rejected below absolute requirement of {}", bestMatch.similarity(), MIN_ABSOLUTE_THRESHOLD);
+                return triggerFallback(step,context,fallbackMsg);
+            }
+
+
+            log.info("📊 Confidence gap check -> Best: {}, Second: {}, Computed Gap: {}", bestScore, secondScore, actualGap);
+
+            if (actualGap < MIN_RELATIVE_GAP) {
+                log.warn("⚠️ Ambiguous result cluster detected. Actual gap of {} is less than required {}. Forcing fallback to protect domain accuracy.", actualGap, MIN_RELATIVE_GAP);
+                return triggerFallback(step,context,fallbackMsg);
+            }
+
+            String cleanAnswerText = bestMatch.answer();
+            if(cleanAnswerText.contains("Answer:")) {
+                String[] segments = cleanAnswerText.split("\n");
+                for(String segment : segments) {
+                    if(segment.trim().startsWith("Answer:")) {
+                        cleanAnswerText = segment.replace("Answer:", "").trim();
+                        break;
+                    }
+                }
+            }
 
             // Store direct exact answer in context
-            context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), bestAnswer);
-            context.setVariable("retrieved_knowledge", bestAnswer);
+            context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), cleanAnswerText);
+            context.setVariable("retrieved_knowledge", cleanAnswerText);
 
             log.info("✅ Knowledge Retrieval complete (Direct Answer).");
-            return  StepResult.success(bestAnswer, step.getMessage());
+            return  StepResult.success(cleanAnswerText, step.getMessage());
 
         } catch (Exception e) {
             log.error("❌ Knowledge Retrieval failed", e);
             return StepResult.error("Knowledge Retrieval failed: " + e.getMessage());
         }
+    }
+
+    private StepResult triggerFallback(JourneyStep step, ExecutionContext context, String fallbackMsg) {
+        context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), fallbackMsg);
+        context.setVariable("retrieved_knowledge", fallbackMsg);
+        return StepResult.success(fallbackMsg,step.getMessage());
     }
 
     private ApiConfig loadApiConfig(String json) {
