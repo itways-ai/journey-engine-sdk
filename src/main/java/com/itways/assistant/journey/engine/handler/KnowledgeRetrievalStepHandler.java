@@ -18,8 +18,10 @@ import java.util.List;
 public class KnowledgeRetrievalStepHandler implements StepHandler {
 
     private static final int    DEFAULT_LIMIT     = 5;
-    private static final double MIN_ABSOLUTE_THRESHOLD = 0.50;
-    private static final double MIN_RELATIVE_GAP       = 0.007;
+    private static final double MIN_ABSOLUTE_THRESHOLD = 0.78;
+    private static final double MIN_RELATIVE_GAP       = 0.04;
+
+    private static final double SURE_MATCH_THRESHOLD= 0.85;
 
 //    private static final String SYNTHESIS_SYSTEM_PROMPT =
 //            "You are a Knowledge Assistant. You have been given relevant excerpts from a knowledge base. " +
@@ -93,31 +95,47 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             );
 
             log.info("📊 Confidence gap check -> Best: {}, Second: {}, Computed Gap: {}", bestScore, secondScore, actualGap);
-
-            if(bestMatch.similarity() < MIN_ABSOLUTE_THRESHOLD) {
+            // GUARD 1: Absolute Floor (Protects against total hallucinations)
+            if(bestScore < MIN_ABSOLUTE_THRESHOLD) {
                 log.warn("❌ Top score {} rejected below absolute requirement of {}", bestMatch.similarity(), MIN_ABSOLUTE_THRESHOLD);
                 return triggerFallback(step,context,fallbackMsg);
             }
 
-
-            log.info("📊 Confidence gap check -> Best: {}, Second: {}, Computed Gap: {}", bestScore, secondScore, actualGap);
-
-            if (actualGap < MIN_RELATIVE_GAP) {
-                log.warn("⚠️ Ambiguous result cluster detected. Actual gap of {} is less than required {}. Forcing fallback to protect domain accuracy.", actualGap, MIN_RELATIVE_GAP);
-                return triggerFallback(step,context,fallbackMsg);
+            // GUARD 2: The "Sure Match" Bypass (For exact Arabic-to-Arabic matches)
+            if(bestScore >= SURE_MATCH_THRESHOLD){
+                log.info("🌟 Sure Match bypassed gap check! Score: {}", bestScore);
+                String cleanAnswerText = bestMatch.answer();
+                context.setVariable(engineUtils.sanitizeKey(step.getStepName()+"_result"), cleanAnswerText);
+                return StepResult.success(cleanAnswerText,step.getMessage());
             }
 
-            String cleanAnswerText = bestMatch.answer();
-            if(cleanAnswerText.contains("Answer:")) {
-                String[] segments = cleanAnswerText.split("\n");
-                for(String segment : segments) {
-                    if(segment.trim().startsWith("Answer:")) {
-                        cleanAnswerText = segment.replace("Answer:", "").trim();
-                        break;
+//            // Guard 2
+//            if (bestScore < SURE_MATCH_THRESHOLD && actualGap < MIN_RELATIVE_GAP) {
+//                log.warn("⚠️ Ambiguous result cluster detected. Actual gap of {} is less than required {}. Forcing fallback to protect domain accuracy.", actualGap, MIN_RELATIVE_GAP);
+//                return triggerFallback(step,context,fallbackMsg);
+//            }
+
+           // GUARD 3: The "Soft Match" / Cross-Lingual Zone
+            if(actualGap < MIN_RELATIVE_GAP) {
+                log.warn("⚠️ Ambiguous cluster detected (Gap {} < {}). Resolving via Context Aggregation.", actualGap, MIN_RELATIVE_GAP);
+                // Because the top scores are strong (>0.78) but the gap is small,
+                // the user's intent matches multiple FAQs.
+                // We combine the top 2 or 3 results into a single context block.
+
+                StringBuilder aggregatedResult = new StringBuilder();
+
+                for(int i=0 ;i<Math.min(results.size(),3);i++){
+                    EngineSearchResult current = results.get(i);
+                    // Only include chunks that are mathematically close to the top score
+                    if((bestScore -current.similarity()) <= MIN_RELATIVE_GAP) {
+                        aggregatedResult.append(current.answer());
                     }
                 }
+                // Pass this aggregated block to your Chatbot LLM node
+              return handleSoftMatch(step,context,aggregatedResult.toString());
             }
-
+            // if between 0.78 and 0.85 return best answer
+            String cleanAnswerText = bestMatch.answer();
             // Store direct exact answer in context
             context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), cleanAnswerText);
             context.setVariable("retrieved_knowledge", cleanAnswerText);
@@ -135,6 +153,12 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
         context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), fallbackMsg);
         context.setVariable("retrieved_knowledge", fallbackMsg);
         return StepResult.success(fallbackMsg,step.getMessage());
+    }
+
+    private StepResult handleSoftMatch(JourneyStep step, ExecutionContext context, String answer) {
+        context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), answer);
+        context.setVariable("retrieved_knowledge", answer);
+        return StepResult.success(answer,step.getMessage());
     }
 
     private ApiConfig loadApiConfig(String json) {
