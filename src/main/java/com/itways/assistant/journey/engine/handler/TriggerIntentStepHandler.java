@@ -2,23 +2,25 @@ package com.itways.assistant.journey.engine.handler;
 
 import org.springframework.stereotype.Component;
 
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepDefinition;
+import com.itways.assistant.journey.engine.model.StepOutputSchema;
 import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
 import lombok.RequiredArgsConstructor;
 
-/**
- * Handler for TRIGGER_INTENT steps.
- * Signals the frontend to trigger a specific intent/action.
- */
 @Component
 @RequiredArgsConstructor
 public class TriggerIntentStepHandler implements StepHandler {
 
     private final EngineUtils engineUtils;
+    private final VariableContext variableContext;
+    private final StepOutputSchemaHelper schemaHelper;
 
     @Override
     public String getType() {
@@ -26,18 +28,20 @@ public class TriggerIntentStepHandler implements StepHandler {
     }
 
     @Override
-    public StepResult execute(JourneyStep step, ExecutionContext context) {
-        // Resolve intent name (actionTarget) from the step definition, supporting
-        // placeholders
-        String action = engineUtils.replacePlaceholders(step.getActionTarget(), context.getVariables());
+    public StepDefinition describe() {
+        return schemaHelper.triggerIntentDefinition();
+    }
 
-        // Update context
+    @Override
+    public StepOutputSchema describeOutputs(JourneyStep step) {
+        return schemaHelper.genericOutputSchema("TRIGGER_INTENT", "Triggered Intent");
+    }
+
+    @Override
+    public StepResult execute(JourneyStep step, ExecutionContext context) {
+        String action = engineUtils.replacePlaceholders(step.getActionTarget(), context.getVariables());
+        variableContext.writeStepOutput(context, step, action);
         context.addStepResult(step.getStepOrder(), action);
-        context.setVariable("step" + step.getStepOrder(), action);
-        context.setVariable("lastStep", action);
-        if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-            context.setVariable(engineUtils.sanitizeKey(step.getStepName()), action);
-        }
 
         String defaultMessage = "Triggering intent: " + action;
         return StepResult.builder()

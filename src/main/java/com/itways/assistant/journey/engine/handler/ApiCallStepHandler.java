@@ -8,7 +8,6 @@ import java.util.Map;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
-import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.BufferingClientHttpRequestFactory;
@@ -19,12 +18,16 @@ import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.RestTemplate;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepDefinition;
+import com.itways.assistant.journey.engine.model.StepOutputSchema;
 import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -35,15 +38,26 @@ import lombok.extern.slf4j.Slf4j;
 public class ApiCallStepHandler implements StepHandler {
 
 	private final EngineUtils engineUtils;
+	private final VariableContext variableContext;
+	private final StepOutputSchemaHelper schemaHelper;
 	private final ObjectMapper objectMapper;
 
-	// Shared properly configured RestTemplate (buffered for response re-reads)
 	private static final RestTemplate restTemplate = new RestTemplate(
 			new BufferingClientHttpRequestFactory(new SimpleClientHttpRequestFactory()));
 
 	@Override
 	public String getType() {
 		return "API_CALL";
+	}
+
+	@Override
+	public StepDefinition describe() {
+		return schemaHelper.apiCallDefinition();
+	}
+
+	@Override
+	public StepOutputSchema describeOutputs(JourneyStep step) {
+		return schemaHelper.apiCallSchema(step);
 	}
 
 	@Override
@@ -59,17 +73,8 @@ public class ApiCallStepHandler implements StepHandler {
 
 			Object processedBody = processBody(config.getBody(), context.getVariables());
 
-			// Detailed Logging for debugging
 			log.info("---> API_CALL Step: '{}'", step.getStepName());
 			log.info("Request URL    : {} {}", config.getMethod(), url);
-			log.info("Request Headers: {}", headers);
-			if (processedBody != null) {
-				try {
-					log.info("Request Body   : {}", objectMapper.writeValueAsString(processedBody));
-				} catch (Exception e) {
-					log.info("Request Body   : {}", processedBody);
-				}
-			}
 
 			HttpEntity<Object> entity = new HttpEntity<>(processedBody, headers);
 			ResponseEntity<Object> response = restTemplate.exchange(url, HttpMethod.valueOf(config.getMethod()), entity,
@@ -77,32 +82,21 @@ public class ApiCallStepHandler implements StepHandler {
 
 			Object apiResult = response.getBody();
 			log.info("<--- API_CALL Step: '{}' status={}", step.getStepName(), response.getStatusCode());
-			if (apiResult != null) {
-				try {
-					log.debug("Response Body  : {}", objectMapper.writeValueAsString(apiResult));
-				} catch (Exception e) {
-					log.debug("Response Body  : {}", apiResult);
-				}
-			}
 
+			variableContext.writeStepOutput(context, step, apiResult);
+			variableContext.writeStepField(context, step, "status", response.getStatusCode().value());
+			variableContext.writeStepField(context, step, "headers", response.getHeaders().toSingleValueMap());
 			context.addStepResult(step.getStepOrder(), apiResult);
-			context.setVariable("step" + step.getStepOrder(), apiResult);
-			if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-				context.setVariable(engineUtils.sanitizeKey(step.getStepName()), apiResult);
-			}
-			if (apiResult instanceof java.util.Map) {
-				context.getVariables().putAll((java.util.Map<String, Object>) apiResult);
-			}
 
 			return StepResult.success(apiResult, step.getMessage());
 		} catch (HttpClientErrorException | HttpServerErrorException e) {
-			log.error("❌ API_CALL step '{}' status={} error={}", step.getStepName(), e.getStatusCode(),
+			log.error("API_CALL step '{}' status={} error={}", step.getStepName(), e.getStatusCode(),
 					e.getResponseBodyAsString());
 			String bodyMsg = e.getResponseBodyAsString();
 			return StepResult.error("API Call Failed [" + e.getStatusCode() + "]: " +
 					(bodyMsg != null && !bodyMsg.isBlank() ? bodyMsg : e.getMessage()));
 		} catch (Exception e) {
-			log.error("❌ API_CALL step '{}' unexpected error", step.getStepName(), e);
+		 log.error("API_CALL step '{}' unexpected error", step.getStepName(), e);
 			return StepResult.error("API Call Failed: " + e.getMessage());
 		}
 	}

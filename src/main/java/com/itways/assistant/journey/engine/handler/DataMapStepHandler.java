@@ -14,12 +14,16 @@ import com.itways.assistant.ai.dto.AiRequestConfig;
 import com.itways.assistant.ai.dto.AiResponse;
 import com.itways.assistant.ai.service.AiService;
 import com.itways.assistant.journey.engine.config.TemplateRender;
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepDefinition;
+import com.itways.assistant.journey.engine.model.StepOutputSchema;
 import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.DataMapped;
 import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
 import lombok.RequiredArgsConstructor;
 
@@ -35,10 +39,10 @@ public class DataMapStepHandler implements StepHandler {
 	private final AiService aiService;
 	private final ObjectMapper objectMapper;
 	private final EngineUtils engineUtils;
+	private final VariableContext variableContext;
+	private final StepOutputSchemaHelper schemaHelper;
 	private final TemplateRender templateRender;
-//	private final AiRequestConfig aiRequestConfig;
 	private final AiConfigProvider aiConfigProvider;
-
 
 	@Override
 	public String getType() {
@@ -46,10 +50,20 @@ public class DataMapStepHandler implements StepHandler {
 	}
 
 	@Override
+	public StepDefinition describe() {
+		return schemaHelper.dataMapDefinition();
+	}
+
+	@Override
+	public StepOutputSchema describeOutputs(JourneyStep step) {
+		return schemaHelper.dataMapSchema(step);
+	}
+
+	@Override
 	public StepResult execute(JourneyStep step, ExecutionContext context) {
 		try {
 			// Extract text from context (usually it's stored in 'text' variable)
-			String text = (String) context.getVariable("text");
+			String text = (String) variableContext.getInputs(context).get("text");
 			String action = step.getActionTarget();
 
 			// Resolve placeholders in action target if any
@@ -64,8 +78,8 @@ public class DataMapStepHandler implements StepHandler {
 			String userPrompt = templateRender.renderFromString(DataMapped.PROMPT, model);
 
 			@SuppressWarnings("unchecked")
-			List<com.itways.assistant.ai.dto.AiWrappedFile> files = (List<com.itways.assistant.ai.dto.AiWrappedFile>) context
-					.getVariable("files");
+			List<com.itways.assistant.ai.dto.AiWrappedFile> files = (List<com.itways.assistant.ai.dto.AiWrappedFile>) variableContext
+					.getInputs(context).get("files");
 
 			// get the configuration from the provider
 			AiRequestConfig aiRequestConfig = aiConfigProvider.getConfig(context.getAccountId());
@@ -86,11 +100,8 @@ public class DataMapStepHandler implements StepHandler {
 				mappedData = unflattenMap((Map<String, Object>) mappedData);
 			}
 
+			variableContext.writeStepOutput(context, step, mappedData);
 			context.addStepResult(step.getStepOrder(), mappedData);
-			context.setVariable("input", mappedData);
-			if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-				context.setVariable(engineUtils.sanitizeKey(step.getStepName()), mappedData);
-			}
 
 			return StepResult.success(mappedData, step.getMessage());
 		} catch (Exception e) {

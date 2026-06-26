@@ -2,10 +2,12 @@ package com.itways.assistant.journey.engine.handler;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.ai.service.impl.LocalEmbeddingEngine;
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.KnowledgeBasePort;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -18,7 +20,7 @@ import java.util.List;
 public class KnowledgeRetrievalStepHandler implements StepHandler {
 
     private static final int    DEFAULT_LIMIT     = 5;
-    private static final double MIN_ABSOLUTE_THRESHOLD = 0.78;
+    private static final double MIN_ABSOLUTE_THRESHOLD = 0.75;
     private static final double MIN_RELATIVE_GAP       = 0.04;
 
     private static final double SURE_MATCH_THRESHOLD= 0.85;
@@ -29,6 +31,8 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
 //            "If the excerpts do not contain enough information to answer, say so clearly. " +
 //            "Do not make up information.";
     private final EngineUtils        engineUtils;
+    private final VariableContext    variableContext;
+    private final StepOutputSchemaHelper schemaHelper;
     private final ObjectMapper       objectMapper;
     private final LocalEmbeddingEngine embeddingEngine;
     private final KnowledgeBasePort  knowledgeBasePort;
@@ -36,6 +40,16 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
     @Override
     public String getType() {
         return "KNOWLEDGE_RETRIEVAL";
+    }
+
+    @Override
+    public StepDefinition describe() {
+        return schemaHelper.knowledgeDefinition();
+    }
+
+    @Override
+    public StepOutputSchema describeOutputs(JourneyStep step) {
+        return schemaHelper.knowledgeRetrievalSchema();
     }
 
     @Override
@@ -50,7 +64,7 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             //    but for standard FAQ flows the user's input IS the query.
             String rawQuery = (config.getQuery() != null && !config.getQuery().isBlank())
                     ? config.getQuery()
-                    : "{{text}}";
+                    : "{{inputs.text}}";
 
             String query = engineUtils.replacePlaceholders(rawQuery, context.getVariables());
 
@@ -105,8 +119,8 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             if(bestScore >= SURE_MATCH_THRESHOLD){
                 log.info("🌟 Sure Match bypassed gap check! Score: {}", bestScore);
                 String cleanAnswerText = bestMatch.answer();
-                context.setVariable(engineUtils.sanitizeKey(step.getStepName()+"_result"), cleanAnswerText);
-                return StepResult.success(cleanAnswerText,step.getMessage());
+                storeKnowledgeOutput(step, context, cleanAnswerText);
+                return StepResult.success(cleanAnswerText, step.getMessage());
             }
 
 //            // Guard 2
@@ -136,12 +150,10 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             }
             // if between 0.78 and 0.85 return best answer
             String cleanAnswerText = bestMatch.answer();
-            // Store direct exact answer in context
-            context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), cleanAnswerText);
-            context.setVariable("retrieved_knowledge", cleanAnswerText);
+            storeKnowledgeOutput(step, context, cleanAnswerText);
 
             log.info("✅ Knowledge Retrieval complete (Direct Answer).");
-            return  StepResult.success(cleanAnswerText, step.getMessage());
+            return StepResult.success(cleanAnswerText, step.getMessage());
 
         } catch (Exception e) {
             log.error("❌ Knowledge Retrieval failed", e);
@@ -150,15 +162,18 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
     }
 
     private StepResult triggerFallback(JourneyStep step, ExecutionContext context, String fallbackMsg) {
-        context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), fallbackMsg);
-        context.setVariable("retrieved_knowledge", fallbackMsg);
-        return StepResult.success(fallbackMsg,step.getMessage());
+        storeKnowledgeOutput(step, context, fallbackMsg);
+        return StepResult.success(fallbackMsg, step.getMessage());
     }
 
     private StepResult handleSoftMatch(JourneyStep step, ExecutionContext context, String answer) {
-        context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), answer);
-        context.setVariable("retrieved_knowledge", answer);
-        return StepResult.success(answer,step.getMessage());
+        storeKnowledgeOutput(step, context, answer);
+        return StepResult.success(answer, step.getMessage());
+    }
+
+    private void storeKnowledgeOutput(JourneyStep step, ExecutionContext context, String answer) {
+        variableContext.writeStepOutput(context, step, answer);
+        context.addStepResult(step.getStepOrder(), answer);
     }
 
     private ApiConfig loadApiConfig(String json) {

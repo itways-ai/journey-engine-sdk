@@ -1,6 +1,7 @@
 package com.itways.assistant.journey.engine.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.JourneyEngine;
 import com.itways.assistant.journey.engine.service.StepHandler;
@@ -19,6 +20,7 @@ public class JourneyEngineImpl implements JourneyEngine {
 
     private final StepHandlerRegistry handlerRegistry;
     private final EngineUtils engineUtils;
+    private final VariableContext variableContext;
 
     @Override
     public Map<String, Object> start(Journey journey, String accountId, Map<String, Object> initialParams) {
@@ -27,16 +29,17 @@ public class JourneyEngineImpl implements JourneyEngine {
                 .accountId(accountId)
                 .currentStepIndex(-1)
                 .status(ExecutionStatus.RUNNING)
-                .variables(new HashMap<>(initialParams))
+                .variables(new HashMap<>())
                 .startedAt(new Date())
                 .build();
+        variableContext.mergeInputs(context, initialParams != null ? initialParams : Map.of());
 
         return execute(journey, context);
     }
 
     @Override
     public Map<String, Object> resume(Journey journey, ExecutionContext context, Map<String, Object> inputParams) {
-        context.getVariables().putAll(inputParams);
+        variableContext.mergeInputs(context, inputParams != null ? inputParams : Map.of());
         context.setStatus(ExecutionStatus.RUNNING);
         return execute(journey, context);
     }
@@ -122,10 +125,6 @@ public class JourneyEngineImpl implements JourneyEngine {
                 context.setCurrentStepIndex(stepOrder);
                 context.addStepResult(stepOrder, stepResult.getData());
 
-                String safeName = engineUtils
-                        .sanitizeKey(step.getStepName() != null ? step.getStepName() : ("step" + stepOrder));
-                context.setVariable(safeName, stepResult.getData());
-                
                 i++;
             } else if ("WAITING".equals(stepResult.getStatus())) {
                 viewResult.put("message", stepResult.getMessage());
@@ -138,33 +137,9 @@ public class JourneyEngineImpl implements JourneyEngine {
                 return result;
             } else if ("JUMP".equals(stepResult.getStatus())) {
                 int targetOrder = (Integer) stepResult.getMetadata().get("targetOrder");
-                
-                // Clear `stepResults` sequencing >= targetOrder
-                List<Integer> ordersToRemove = new java.util.ArrayList<>(context.getStepResults().keySet());
-                for (Integer order : ordersToRemove) {
-                    if (order >= targetOrder) {
-                         context.getStepResults().remove(order);
-                    }
-                }
-                
-                // Keep variables alive if they were also created by a step < targetOrder
-                java.util.Set<String> safeNamesToKeep = steps.stream()
-                        .filter(s -> s.getStepOrder() < targetOrder)
-                        .map(s -> engineUtils.sanitizeKey(s.getStepName() != null ? s.getStepName() : ("step" + s.getStepOrder())))
-                        .collect(java.util.stream.Collectors.toSet());
-
-                for (JourneyStep s : steps) {
-                    if (s.getStepOrder() >= targetOrder) {
-                         String name = engineUtils.sanitizeKey(s.getStepName() != null ? s.getStepName() : ("step" + s.getStepOrder()));
-                         if (!safeNamesToKeep.contains(name)) {
-                              context.getVariables().remove(name);
-                         }
-                    }
-                }
-                context.getVariables().keySet().removeIf(k -> k.startsWith("step") && ordersToRemove.stream().anyMatch(o -> o >= targetOrder && k.equals("step" + o)));
-                
+                variableContext.clearStepOutputsFromOrder(context, targetOrder);
                 context.setCurrentStepIndex(targetOrder - 1);
-                i = 0; // Reset loop to run from start
+                i = 0;
                 continue;
             } else {
                 viewResult.put("message", stepResult.getMessage());
@@ -172,13 +147,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                 if (step.isContinueOnError()) {
                     context.addStepResult(stepOrder, "FAILED");
                     context.setCurrentStepIndex(stepOrder);
-
-                    // Propagate "FAILED" status to variables so subsequent steps don't see nulls
-                    context.setVariable("step" + stepOrder, "FAILED");
-                    context.setVariable("lastStep", "FAILED");
-                    if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-                        context.setVariable(engineUtils.sanitizeKey(step.getStepName()), "FAILED");
-                    }
+                    variableContext.writeStepOutput(context, step, "FAILED");
                 } else {
                     context.setStatus(ExecutionStatus.ERROR);
                     break;

@@ -1,14 +1,14 @@
 package com.itways.assistant.journey.engine.handler;
 
-import java.util.HashMap;
-import java.util.Map;
-
 import org.springframework.stereotype.Component;
 
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepDefinition;
+import com.itways.assistant.journey.engine.model.StepOutputSchema;
 import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.StepHandler;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
 import lombok.RequiredArgsConstructor;
 
@@ -16,27 +16,35 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class JumpHandler implements StepHandler {
 
+    private final StepOutputSchemaHelper schemaHelper;
+
     @Override
     public String getType() {
         return "JUMP";
     }
 
     @Override
+    public StepDefinition describe() {
+        return schemaHelper.jumpDefinition();
+    }
+
+    @Override
+    public StepOutputSchema describeOutputs(JourneyStep step) {
+        return StepOutputSchema.empty("JUMP");
+    }
+
+    @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         try {
             int targetStepOrder = Integer.parseInt(step.getActionTarget());
-            
-            Map<String, Object> metadata = new HashMap<>();
-            metadata.put("targetOrder", targetStepOrder);
-            
             return StepResult.builder()
-                .status("JUMP")
-                .metadata(metadata)
-                .message(step.getMessage() != null ? step.getMessage() : "Jumping to step " + targetStepOrder)
-                .data(targetStepOrder) // for reference
-                .build();
+                    .status("JUMP")
+                    .metadata(java.util.Map.of("targetOrder", targetStepOrder))
+                    .message(step.getMessage() != null ? step.getMessage() : "Jumping to step " + targetStepOrder)
+                    .data(targetStepOrder)
+                    .build();
         } catch (NumberFormatException e) {
-            return StepResult.error("Invalid JUMP target: " + step.getActionTarget() + ". Must be an integer representing stepOrder.");
+            return StepResult.error("Invalid JUMP target: " + step.getActionTarget());
         }
     }
 }

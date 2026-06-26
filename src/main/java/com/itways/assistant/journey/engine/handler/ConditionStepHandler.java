@@ -2,11 +2,15 @@ package com.itways.assistant.journey.engine.handler;
 
 import org.springframework.stereotype.Component;
 
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepDefinition;
+import com.itways.assistant.journey.engine.model.StepOutputSchema;
 import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
 import lombok.RequiredArgsConstructor;
 
@@ -15,6 +19,8 @@ import lombok.RequiredArgsConstructor;
 public class ConditionStepHandler implements StepHandler {
 
 	private final EngineUtils engineUtils;
+	private final VariableContext variableContext;
+	private final StepOutputSchemaHelper schemaHelper;
 
 	@Override
 	public String getType() {
@@ -22,16 +28,20 @@ public class ConditionStepHandler implements StepHandler {
 	}
 
 	@Override
+	public StepDefinition describe() {
+		return schemaHelper.conditionDefinition();
+	}
+
+	@Override
+	public StepOutputSchema describeOutputs(JourneyStep step) {
+		return schemaHelper.conditionSchema();
+	}
+
+	@Override
 	public StepResult execute(JourneyStep step, ExecutionContext context) {
 		boolean cond = engineUtils.evaluateCondition(step.getConditionExpression(), context.getVariables());
-
+		variableContext.writeStepOutput(context, step, cond);
 		context.addStepResult(step.getStepOrder(), cond);
-		// Sync to context variables for placeholder rendering
-		context.setVariable("step" + step.getStepOrder(), cond);
-		if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-			context.setVariable(engineUtils.sanitizeKey(step.getStepName()), cond);
-		}
-
 		return StepResult.success(cond, step.getMessage());
 	}
 }
