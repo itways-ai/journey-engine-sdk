@@ -20,7 +20,7 @@ import java.util.List;
 public class KnowledgeRetrievalStepHandler implements StepHandler {
 
     private static final int    DEFAULT_LIMIT     = 5;
-    private static final double MIN_ABSOLUTE_THRESHOLD = 0.75;
+    private static final double MIN_ABSOLUTE_THRESHOLD = 0.70;
     private static final double MIN_RELATIVE_GAP       = 0.04;
 
     private static final double SURE_MATCH_THRESHOLD= 0.85;
@@ -129,24 +129,12 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
 //                return triggerFallback(step,context,fallbackMsg);
 //            }
 
-           // GUARD 3: The "Soft Match" / Cross-Lingual Zone
+            // GUARD 3: The "Soft Match" / Cross-Lingual Zone
             if(actualGap < MIN_RELATIVE_GAP) {
-                log.warn("⚠️ Ambiguous cluster detected (Gap {} < {}). Resolving via Context Aggregation.", actualGap, MIN_RELATIVE_GAP);
-                // Because the top scores are strong (>0.78) but the gap is small,
-                // the user's intent matches multiple FAQs.
-                // We combine the top 2 or 3 results into a single context block.
-
-                StringBuilder aggregatedResult = new StringBuilder();
-
-                for(int i=0 ;i<Math.min(results.size(),3);i++){
-                    EngineSearchResult current = results.get(i);
-                    // Only include chunks that are mathematically close to the top score
-                    if((bestScore -current.similarity()) <= MIN_RELATIVE_GAP) {
-                        aggregatedResult.append(current.answer());
-                    }
-                }
-                // Pass this aggregated block to your Chatbot LLM node
-              return handleSoftMatch(step,context,aggregatedResult.toString());
+                log.warn("⚠️ Ambiguous cluster detected (Gap {} < {}). Returning best scored answer.", actualGap, MIN_RELATIVE_GAP);
+                String cleanAnswerText = bestMatch.answer();
+                storeKnowledgeOutput(step, context, cleanAnswerText);
+                return StepResult.success(cleanAnswerText, step.getMessage());
             }
             // if between 0.78 and 0.85 return best answer
             String cleanAnswerText = bestMatch.answer();
