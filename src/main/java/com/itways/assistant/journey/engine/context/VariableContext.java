@@ -122,6 +122,11 @@ public class VariableContext {
         writeStepField(context, step, "output", output);
     }
 
+    public void storeOutput(ExecutionContext context, JourneyStep step, Object output) {
+        writeStepOutput(context, step, output);
+        context.addStepResult(step.getStepOrder(), output);
+    }
+
     @SuppressWarnings("unchecked")
     public void writeStepField(ExecutionContext context, JourneyStep step, String field, Object value) {
         ensureStructure(context);

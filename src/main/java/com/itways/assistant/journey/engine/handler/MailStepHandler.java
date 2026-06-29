@@ -43,8 +43,7 @@ public class MailStepHandler implements StepHandler {
         try {
             MailConfig mailConfig = objectMapper.readValue(step.getApiConfig(), MailConfig.class);
             String result = "Mail sent to " + mailConfig.getTo();
-            variableContext.writeStepOutput(context, step, result);
-            context.addStepResult(step.getStepOrder(), result);
+            variableContext.storeOutput(context, step, result);
             return StepResult.success(result, step.getMessage() != null ? step.getMessage() : result);
         } catch (Exception e) {
             return StepResult.error("Mail Send Failed: " + e.getMessage());

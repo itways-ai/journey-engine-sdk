@@ -17,7 +17,6 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.RestTemplate;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
@@ -40,7 +39,6 @@ public class ApiCallStepHandler implements StepHandler {
 	private final EngineUtils engineUtils;
 	private final VariableContext variableContext;
 	private final StepOutputSchemaHelper schemaHelper;
-	private final ObjectMapper objectMapper;
 
 	private static final RestTemplate restTemplate = new RestTemplate(
 			new BufferingClientHttpRequestFactory(new SimpleClientHttpRequestFactory()));
@@ -64,7 +62,7 @@ public class ApiCallStepHandler implements StepHandler {
 	public StepResult execute(JourneyStep step, ExecutionContext context) {
 		try {
 			String url = engineUtils.replacePlaceholders(step.getActionTarget(), context.getVariables());
-			ApiConfig config = loadApiConfig(step.getApiConfig());
+			ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
 
 			HttpHeaders headers = new HttpHeaders();
 			headers.setContentType(MediaType.APPLICATION_JSON);
@@ -83,10 +81,9 @@ public class ApiCallStepHandler implements StepHandler {
 			Object apiResult = response.getBody();
 			log.info("<--- API_CALL Step: '{}' status={}", step.getStepName(), response.getStatusCode());
 
-			variableContext.writeStepOutput(context, step, apiResult);
-			variableContext.writeStepField(context, step, "status", response.getStatusCode().value());
-			variableContext.writeStepField(context, step, "headers", response.getHeaders().toSingleValueMap());
-			context.addStepResult(step.getStepOrder(), apiResult);
+		variableContext.storeOutput(context, step, apiResult);
+		variableContext.writeStepField(context, step, "status", response.getStatusCode().value());
+		variableContext.writeStepField(context, step, "headers", response.getHeaders().toSingleValueMap());
 
 			return StepResult.success(apiResult, step.getMessage());
 		} catch (HttpClientErrorException | HttpServerErrorException e) {
@@ -122,13 +119,4 @@ public class ApiCallStepHandler implements StepHandler {
 		return body;
 	}
 
-	private ApiConfig loadApiConfig(String json) {
-		try {
-			if (json == null || json.isEmpty())
-				return new ApiConfig();
-			return objectMapper.readValue(json, ApiConfig.class);
-		} catch (Exception e) {
-			return new ApiConfig();
-		}
-	}
 }

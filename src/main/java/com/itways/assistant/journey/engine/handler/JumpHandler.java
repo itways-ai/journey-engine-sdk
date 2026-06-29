@@ -37,12 +37,8 @@ public class JumpHandler implements StepHandler {
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         try {
             int targetStepOrder = Integer.parseInt(step.getActionTarget());
-            return StepResult.builder()
-                    .status("JUMP")
-                    .metadata(java.util.Map.of("targetOrder", targetStepOrder))
-                    .message(step.getMessage() != null ? step.getMessage() : "Jumping to step " + targetStepOrder)
-                    .data(targetStepOrder)
-                    .build();
+            String message = step.getMessage() != null ? step.getMessage() : "Jumping to step " + targetStepOrder;
+            return StepResult.jump(targetStepOrder, message);
         } catch (NumberFormatException e) {
             return StepResult.error("Invalid JUMP target: " + step.getActionTarget());
         }

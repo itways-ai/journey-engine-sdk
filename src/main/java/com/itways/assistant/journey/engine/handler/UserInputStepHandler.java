@@ -5,7 +5,6 @@ import java.util.Map;
 
 import org.springframework.stereotype.Component;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
@@ -27,7 +26,6 @@ public class UserInputStepHandler implements StepHandler {
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
-    private final ObjectMapper objectMapper;
 
     @Override
     public String getType() {
@@ -46,13 +44,12 @@ public class UserInputStepHandler implements StepHandler {
 
     @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
-        ApiConfig uiConfig = loadApiConfig(step.getApiConfig());
+        ApiConfig uiConfig = engineUtils.parseApiConfig(step.getApiConfig());
         Map<String, Object> inputs = variableContext.getInputs(context);
         Object answer = inputs.get("answer");
 
         if (answer != null) {
-            variableContext.writeStepOutput(context, step, answer);
-            context.addStepResult(step.getStepOrder(), answer);
+            variableContext.storeOutput(context, step, answer);
             inputs.remove("answer");
 
             if ("INTERACTIVE".equalsIgnoreCase(uiConfig.getInputMode()) && answer instanceof String) {
@@ -101,13 +98,4 @@ public class UserInputStepHandler implements StepHandler {
         return metadata;
     }
 
-    private ApiConfig loadApiConfig(String json) {
-        try {
-            if (json == null || json.isEmpty())
-                return new ApiConfig();
-            return objectMapper.readValue(json, ApiConfig.class);
-        } catch (Exception e) {
-            return new ApiConfig();
-        }
-    }
 }

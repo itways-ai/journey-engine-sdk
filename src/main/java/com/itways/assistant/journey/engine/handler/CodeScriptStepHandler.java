@@ -9,7 +9,6 @@ import javax.script.ScriptEngineManager;
 
 import org.springframework.stereotype.Component;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
@@ -32,7 +31,6 @@ public class CodeScriptStepHandler implements StepHandler {
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
-    private final ObjectMapper objectMapper;
 
     @Override
     public String getType() {
@@ -52,7 +50,7 @@ public class CodeScriptStepHandler implements StepHandler {
     @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         try {
-            ApiConfig config = loadApiConfig(step.getApiConfig());
+            ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
             String code = config.getCode();
             if (code == null || code.isEmpty()) {
                 return StepResult.error("Script code is missing");
@@ -76,8 +74,7 @@ public class CodeScriptStepHandler implements StepHandler {
                 resultValue = "TRANSFORMATION_ERROR";
             }
 
-            variableContext.writeStepOutput(context, step, resultValue);
-            context.addStepResult(step.getStepOrder(), resultValue);
+            variableContext.storeOutput(context, step, resultValue);
             return StepResult.success(resultValue, step.getMessage());
         } catch (Exception e) {
             log.error("Code Script failed", e);
@@ -85,14 +82,4 @@ public class CodeScriptStepHandler implements StepHandler {
         }
     }
 
-    private ApiConfig loadApiConfig(String json) {
-        try {
-            if (json == null || json.isEmpty()) {
-                return new ApiConfig();
-            }
-            return objectMapper.readValue(json, ApiConfig.class);
-        } catch (Exception e) {
-            return new ApiConfig();
-        }
-    }
 }

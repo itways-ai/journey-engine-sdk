@@ -5,7 +5,6 @@ import java.util.Map;
 
 import org.springframework.stereotype.Component;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.ai.service.AiService;
 import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ApiConfig;
@@ -29,7 +28,6 @@ public class DocumentInsightStepHandler implements StepHandler {
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
-    private final ObjectMapper objectMapper;
     private final AiService aiService;
 
     @Override
@@ -55,7 +53,7 @@ public class DocumentInsightStepHandler implements StepHandler {
     @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         try {
-            ApiConfig config = loadApiConfig(step.getApiConfig());
+            ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
             String strategy = config.getStrategy() != null ? config.getStrategy() : "OCR_DETAILED";
 
             Map<String, Object> simulationData = new HashMap<>();
@@ -66,8 +64,7 @@ public class DocumentInsightStepHandler implements StepHandler {
                     "processed_via", "Neural OCR Core",
                     "automatic_extraction", config.getAutoExtract() != null ? config.getAutoExtract() : true));
 
-            variableContext.writeStepOutput(context, step, simulationData);
-            context.addStepResult(step.getStepOrder(), simulationData);
+            variableContext.storeOutput(context, step, simulationData);
             return StepResult.success(simulationData, "Document processed successfully using " + strategy);
         } catch (Exception e) {
             log.error("Document Insight failed", e);
@@ -75,14 +72,4 @@ public class DocumentInsightStepHandler implements StepHandler {
         }
     }
 
-    private ApiConfig loadApiConfig(String json) {
-        try {
-            if (json == null || json.isEmpty()) {
-                return new ApiConfig();
-            }
-            return objectMapper.readValue(json, ApiConfig.class);
-        } catch (Exception e) {
-            return new ApiConfig();
-        }
-    }
 }

@@ -1,5 +1,8 @@
 package com.itways.assistant.journey.engine.util;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.itways.assistant.journey.engine.model.ApiConfig;
+import lombok.RequiredArgsConstructor;
 import org.springframework.context.expression.MapAccessor;
 import org.springframework.expression.ExpressionParser;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
@@ -11,8 +14,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Component
+@RequiredArgsConstructor
 public class EngineUtils {
 
+    private final ObjectMapper objectMapper;
     private final ExpressionParser parser = new SpelExpressionParser();
     private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\{\\{([a-zA-Z0-9_\\.]+)\\}\\}");
 
@@ -72,5 +77,14 @@ public class EngineUtils {
 
     public String sanitizeKey(String name) {
         return name == null ? "unknown" : name.replaceAll("[^a-zA-Z0-9]", "");
+    }
+
+    public ApiConfig parseApiConfig(String json) {
+        try {
+            if (json == null || json.isEmpty()) return new ApiConfig();
+            return objectMapper.readValue(json, ApiConfig.class);
+        } catch (Exception e) {
+            return new ApiConfig();
+        }
     }
 }

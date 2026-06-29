@@ -40,8 +40,7 @@ public class TemplateRenderHandler implements StepHandler {
         try {
             Long.parseLong(step.getActionTarget());
             String rendered = "";
-            variableContext.writeStepOutput(context, step, rendered);
-            context.addStepResult(step.getStepOrder(), rendered);
+            variableContext.storeOutput(context, step, rendered);
             return StepResult.success(rendered, step.getMessage());
         } catch (Exception e) {
             return StepResult.error("Template Rendering Failed: " + e.getMessage());

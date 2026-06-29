@@ -40,8 +40,7 @@ public class ConditionStepHandler implements StepHandler {
 	@Override
 	public StepResult execute(JourneyStep step, ExecutionContext context) {
 		boolean cond = engineUtils.evaluateCondition(step.getConditionExpression(), context.getVariables());
-		variableContext.writeStepOutput(context, step, cond);
-		context.addStepResult(step.getStepOrder(), cond);
+		variableContext.storeOutput(context, step, cond);
 		return StepResult.success(cond, step.getMessage());
 	}
 }

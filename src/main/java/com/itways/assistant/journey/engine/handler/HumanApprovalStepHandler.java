@@ -5,7 +5,6 @@ import java.util.Map;
 
 import org.springframework.stereotype.Component;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
@@ -29,7 +28,6 @@ public class HumanApprovalStepHandler implements StepHandler {
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
-    private final ObjectMapper objectMapper;
 
     @Override
     public String getType() {
@@ -50,14 +48,13 @@ public class HumanApprovalStepHandler implements StepHandler {
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         Object answer = variableContext.getInputs(context).get("answer");
         if (answer != null) {
-            variableContext.writeStepOutput(context, step, answer);
-            context.addStepResult(step.getStepOrder(), answer);
+            variableContext.storeOutput(context, step, answer);
             variableContext.getInputs(context).remove("answer");
             return StepResult.success(answer, "Human approval granted: " + answer);
         }
 
         context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);
-        ApiConfig config = loadApiConfig(step.getApiConfig());
+        ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
 
         Map<String, Object> metadata = new HashMap<>();
         metadata.put("type", "HUMAN_GOVERNANCE");
@@ -74,14 +71,4 @@ public class HumanApprovalStepHandler implements StepHandler {
         return StepResult.waiting(prompt, metadata);
     }
 
-    private ApiConfig loadApiConfig(String json) {
-        try {
-            if (json == null || json.isEmpty()) {
-                return new ApiConfig();
-            }
-            return objectMapper.readValue(json, ApiConfig.class);
-        } catch (Exception e) {
-            return new ApiConfig();
-        }
-    }
 }

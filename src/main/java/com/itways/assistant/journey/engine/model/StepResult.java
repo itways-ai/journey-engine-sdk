@@ -47,4 +47,13 @@ public class StepResult {
                 .metadata(metadata)
                 .build();
     }
+
+    public static StepResult jump(int targetOrder, String message) {
+        return StepResult.builder()
+                .status("JUMP")
+                .message(message)
+                .metadata(Map.of("targetOrder", targetOrder))
+                .data(targetOrder)
+                .build();
+    }
 }

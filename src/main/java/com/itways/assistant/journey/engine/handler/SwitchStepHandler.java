@@ -40,8 +40,7 @@ public class SwitchStepHandler implements StepHandler {
     @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         Object switchVal = engineUtils.evaluateExpression(step.getConditionExpression(), context.getVariables());
-        variableContext.writeStepOutput(context, step, switchVal);
-        context.addStepResult(step.getStepOrder(), switchVal);
-        return StepResult.builder().status("SUCCESS").data(switchVal).build();
+        variableContext.storeOutput(context, step, switchVal);
+        return StepResult.success(switchVal);
     }
 }

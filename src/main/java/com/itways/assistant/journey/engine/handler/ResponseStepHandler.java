@@ -41,13 +41,8 @@ public class ResponseStepHandler implements StepHandler {
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         String resp = engineUtils.replacePlaceholders(step.getActionTarget(), context.getVariables());
 
-        variableContext.writeStepOutput(context, step, resp);
-        context.addStepResult(step.getStepOrder(), resp);
+        variableContext.storeOutput(context, step, resp);
 
-        return StepResult.builder()
-                .status("SUCCESS")
-                .message(resp)
-                .data(resp)
-                .build();
+        return StepResult.success(resp, resp);
     }
 }

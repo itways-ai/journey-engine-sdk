@@ -31,11 +31,6 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class DataMapStepHandler implements StepHandler {
 	private static final String DEFAULT_FILL_SYSTEM_PROMPT = "You are a data mapping AI. Your goal is to fill a JSON template using information from the user's input. Return ONLY valid JSON, starting with { and ending with }. Do not add any conversational text before or after.";
-	// private static final String DEFAULT_FILL_SYSTEM_PROMPT = "You are a data
-	// mapping AI. Your goal is to fill a JSON template using information from the
-	// user's input (text and files). Follow the instructions strictly and return
-	// ONLY the resulting JSON.";
-
 	private final AiService aiService;
 	private final ObjectMapper objectMapper;
 	private final EngineUtils engineUtils;
@@ -100,8 +95,7 @@ public class DataMapStepHandler implements StepHandler {
 				mappedData = unflattenMap((Map<String, Object>) mappedData);
 			}
 
-			variableContext.writeStepOutput(context, step, mappedData);
-			context.addStepResult(step.getStepOrder(), mappedData);
+			variableContext.storeOutput(context, step, mappedData);
 
 			return StepResult.success(mappedData, step.getMessage());
 		} catch (Exception e) {

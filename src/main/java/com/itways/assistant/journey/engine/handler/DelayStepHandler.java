@@ -5,7 +5,6 @@ import java.util.Map;
 
 import org.springframework.stereotype.Component;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
@@ -29,7 +28,6 @@ public class DelayStepHandler implements StepHandler {
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
-    private final ObjectMapper objectMapper;
 
     @Override
     public String getType() {
@@ -48,7 +46,7 @@ public class DelayStepHandler implements StepHandler {
 
     @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
-        ApiConfig config = loadApiConfig(step.getApiConfig());
+        ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
         Integer duration = config.getDuration() != null ? config.getDuration() : 5;
         String unit = config.getUnit() != null ? config.getUnit().toUpperCase() : "SECONDS";
 
@@ -58,7 +56,7 @@ public class DelayStepHandler implements StepHandler {
         if (Boolean.TRUE.equals(runtime.get(delayFinishedKey))) {
             runtime.remove(delayFinishedKey);
             Map<String, Object> result = Map.of("waited", duration, "unit", unit);
-            variableContext.writeStepOutput(context, step, result);
+            variableContext.storeOutput(context, step, result);
             return StepResult.success(result, "Delay completed.");
         }
 
@@ -85,14 +83,4 @@ public class DelayStepHandler implements StepHandler {
         return StepResult.waiting(prompt, metadata);
     }
 
-    private ApiConfig loadApiConfig(String json) {
-        try {
-            if (json == null || json.isEmpty()) {
-                return new ApiConfig();
-            }
-            return objectMapper.readValue(json, ApiConfig.class);
-        } catch (Exception e) {
-            return new ApiConfig();
-        }
-    }
 }

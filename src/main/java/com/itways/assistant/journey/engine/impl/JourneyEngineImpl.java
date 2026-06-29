@@ -6,7 +6,6 @@ import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.JourneyEngine;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.service.StepHandlerRegistry;
-import com.itways.assistant.journey.engine.util.EngineUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -19,8 +18,8 @@ import java.util.*;
 public class JourneyEngineImpl implements JourneyEngine {
 
     private final StepHandlerRegistry handlerRegistry;
-    private final EngineUtils engineUtils;
     private final VariableContext variableContext;
+    private final ObjectMapper objectMapper;
 
     @Override
     public Map<String, Object> start(Journey journey, String accountId, Map<String, Object> initialParams) {
@@ -46,7 +45,7 @@ public class JourneyEngineImpl implements JourneyEngine {
 
     private Map<String, Object> execute(Journey journey, ExecutionContext context) {
 
-        System.out.println("START JOURNEY EXECUTION>>");
+        log.debug("Starting journey execution: id={}", journey.getId());
         Map<String, Object> result = new HashMap<>();
         List<Map<String, Object>> stepResults = new ArrayList<>();
 
@@ -118,12 +117,11 @@ public class JourneyEngineImpl implements JourneyEngine {
                 if (stepResult.getData() != null) {
                     viewResult.put("data", stepResult.getData());
                     try {
-                        viewResult.put("outputPayload", new ObjectMapper().writeValueAsString(stepResult.getData()));
-                    } catch(Exception ignored){}
+                        viewResult.put("outputPayload", objectMapper.writeValueAsString(stepResult.getData()));
+                    } catch (Exception ignored) {}
                 }
                 stepResults.add(viewResult);
                 context.setCurrentStepIndex(stepOrder);
-                context.addStepResult(stepOrder, stepResult.getData());
 
                 i++;
             } else if ("WAITING".equals(stepResult.getStatus())) {

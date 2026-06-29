@@ -40,15 +40,9 @@ public class TriggerIntentStepHandler implements StepHandler {
     @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         String action = engineUtils.replacePlaceholders(step.getActionTarget(), context.getVariables());
-        variableContext.writeStepOutput(context, step, action);
-        context.addStepResult(step.getStepOrder(), action);
+        variableContext.storeOutput(context, step, action);
 
-        String defaultMessage = "Triggering intent: " + action;
-        return StepResult.builder()
-                .status("SUCCESS")
-                .actionTarget(action)
-                .message(step.getMessage() != null ? step.getMessage() : defaultMessage)
-                .data(action)
-                .build();
+        String message = step.getMessage() != null ? step.getMessage() : "Triggering intent: " + action;
+        return StepResult.success(action, message);
     }
 }
