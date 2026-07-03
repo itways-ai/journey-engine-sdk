@@ -116,13 +116,18 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
                 return StepResult.success(cleanAnswerText, step.getMessage());
             }
 
-           // GUARD 3: Ambiguous cluster — scores are close; still return the top match only
-            if (actualGap < MIN_RELATIVE_GAP) {
-                log.warn(
-                        "⚠️ Ambiguous cluster detected (Gap {} < {}). Using highest-scoring match only.",
-                        actualGap,
-                        MIN_RELATIVE_GAP
-                );
+//            // Guard 2
+//            if (bestScore < SURE_MATCH_THRESHOLD && actualGap < MIN_RELATIVE_GAP) {
+//                log.warn("⚠️ Ambiguous result cluster detected. Actual gap of {} is less than required {}. Forcing fallback to protect domain accuracy.", actualGap, MIN_RELATIVE_GAP);
+//                return triggerFallback(step,context,fallbackMsg);
+//            }
+
+            // GUARD 3: The "Soft Match" / Cross-Lingual Zone
+            if(actualGap < MIN_RELATIVE_GAP) {
+                log.warn("⚠️ Ambiguous cluster detected (Gap {} < {}). Returning best scored answer.", actualGap, MIN_RELATIVE_GAP);
+                String cleanAnswerText = bestMatch.answer();
+                storeKnowledgeOutput(step, context, cleanAnswerText);
+                return StepResult.success(cleanAnswerText, step.getMessage());
             }
 
             String cleanAnswerText = bestMatch.answer();
