@@ -2,11 +2,14 @@ package com.itways.assistant.journey.engine.handler;
 
 import org.springframework.stereotype.Component;
 
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepDefinition;
+import com.itways.assistant.journey.engine.model.StepOutputSchema;
 import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.StepHandler;
-import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
 import lombok.RequiredArgsConstructor;
 
@@ -14,8 +17,8 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class TemplateRenderHandler implements StepHandler {
 
-    // private final TemplateRendererPort templateRenderer;
-    private final EngineUtils engineUtils;
+    private final VariableContext variableContext;
+    private final StepOutputSchemaHelper schemaHelper;
 
     @Override
     public String getType() {
@@ -23,19 +26,21 @@ public class TemplateRenderHandler implements StepHandler {
     }
 
     @Override
+    public StepDefinition describe() {
+        return schemaHelper.templateRenderDefinition();
+    }
+
+    @Override
+    public StepOutputSchema describeOutputs(JourneyStep step) {
+        return schemaHelper.genericOutputSchema("TEMPLATE_RENDER", "Rendered Output");
+    }
+
+    @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         try {
-            Long templateId = Long.parseLong(step.getActionTarget());
-            // In a real implementation, we'd load the ApiConfig for allowMissingInputs flag
-            // For now, simplicity:
-            // templateRenderer.render(templateId, context.getVariables(), false);
+            Long.parseLong(step.getActionTarget());
             String rendered = "";
-            context.addStepResult(step.getStepOrder(), rendered);
-            context.setVariable("step" + step.getStepOrder(), rendered);
-            if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-                context.setVariable(engineUtils.sanitizeKey(step.getStepName()), rendered);
-            }
-
+            variableContext.storeOutput(context, step, rendered);
             return StepResult.success(rendered, step.getMessage());
         } catch (Exception e) {
             return StepResult.error("Template Rendering Failed: " + e.getMessage());
