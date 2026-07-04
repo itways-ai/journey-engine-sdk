@@ -1,5 +1,6 @@
 package com.itways.assistant.journey.engine.model;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -31,6 +32,7 @@ public class ApiConfig {
     private String query;
     private String indexName;
     private Integer limit;
+    @JsonAlias("similarityThreshold")
     private Double threshold;
 
     // Elite: Human Approval

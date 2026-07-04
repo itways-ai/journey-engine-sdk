@@ -12,6 +12,9 @@ import java.util.List;
  */
 public interface KnowledgeBasePort {
 
+    String DEFAULT_EMBEDDING_MODEL = "granite-embedding:278m";
+    int DEFAULT_EMBEDDING_DIMENSION = 768;
+
     /**
      * Searches for the most similar chunks to the given query vector.
      *
@@ -24,5 +27,26 @@ public interface KnowledgeBasePort {
     List<EngineSearchResult> search(String accountId,
                                     String indexName,
                                     float[] queryVector,
-                                    int limit);
+                                    int limit,
+                                    String embeddingModel,
+                                    int embeddingDimension);
+
+    default List<EngineSearchResult> search(String accountId,
+                                            String indexName,
+                                            float[] queryVector,
+                                            int limit) {
+        return search(
+                accountId,
+                indexName,
+                queryVector,
+                limit,
+                DEFAULT_EMBEDDING_MODEL,
+                DEFAULT_EMBEDDING_DIMENSION);
+    }
+
+    default EmbeddingMetadata getEmbeddingMetadata(String accountId, String indexName) {
+        return new EmbeddingMetadata(DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSION);
+    }
+
+    record EmbeddingMetadata(String embeddingModel, int embeddingDimension) {}
 }

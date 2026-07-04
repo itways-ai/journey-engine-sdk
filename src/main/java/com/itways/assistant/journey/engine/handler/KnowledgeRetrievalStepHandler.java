@@ -18,17 +18,16 @@ import java.util.List;
 @RequiredArgsConstructor
 public class KnowledgeRetrievalStepHandler implements StepHandler {
 
-    private static final int    DEFAULT_LIMIT     = 5;
+    private static final int DEFAULT_LIMIT = 5;
     private static final double MIN_ABSOLUTE_THRESHOLD = 0.70;
-    private static final double MIN_RELATIVE_GAP       = 0.04;
-
+    private static final double MIN_RELATIVE_GAP = 0.04;
     private static final double SURE_MATCH_THRESHOLD = 0.85;
 
-    private final EngineUtils        engineUtils;
-    private final VariableContext    variableContext;
+    private final EngineUtils engineUtils;
+    private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
     private final LocalEmbeddingEngine embeddingEngine;
-    private final KnowledgeBasePort  knowledgeBasePort;
+    private final KnowledgeBasePort knowledgeBasePort;
 
     @Override
     public String getType() {
@@ -51,16 +50,11 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
             String accountId = context.getAccountId();
 
-
-            // 1. Query = user's message (context variable "text").
-            //    Optionally overridable via apiConfig.query with {{placeholder}} syntax,
-            //    but for standard FAQ flows the user's input IS the query.
             String rawQuery = (config.getQuery() != null && !config.getQuery().isBlank())
                     ? config.getQuery()
                     : "{{inputs.text}}";
 
             String query = engineUtils.replacePlaceholders(rawQuery, context.getVariables());
-
             if (query.isBlank()) {
                 return StepResult.error("KNOWLEDGE_RETRIEVAL: query is empty");
             }
@@ -70,61 +64,55 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
                 return StepResult.error("KNOWLEDGE_RETRIEVAL: indexName is required");
             }
 
-            int    limit     = config.getLimit()     != null ? config.getLimit()     : DEFAULT_LIMIT;
+            int limit = config.getLimit() != null ? config.getLimit() : DEFAULT_LIMIT;
+            double minimumScore = resolveThreshold(config.getThreshold());
 
-            log.info("🔍 Knowledge Scored Retrieval: index='{}', query='{}'", indexName, query);
+            KnowledgeBasePort.EmbeddingMetadata embeddingMetadata =
+                    knowledgeBasePort.getEmbeddingMetadata(accountId, indexName);
 
-            float[] queryVector = embeddingEngine.embed(query);
+            log.info("Knowledge Scored Retrieval: index='{}', query='{}', embeddingModel='{}', dimension={}, threshold={}",
+                    indexName, query, embeddingMetadata.embeddingModel(), embeddingMetadata.embeddingDimension(), minimumScore);
 
-            // Vector search via port (implemented in journey-service)
+            float[] queryVector = embeddingEngine.embed(query, embeddingMetadata.embeddingModel());
+
             List<EngineSearchResult> results = knowledgeBasePort.search(
-                    accountId, indexName, queryVector, limit);
+                    accountId,
+                    indexName,
+                    queryVector,
+                    limit,
+                    embeddingMetadata.embeddingModel(),
+                    embeddingMetadata.embeddingDimension());
 
             String fallbackMsg = "I don't have information about this.";
 
             if (results.isEmpty()) {
-                log.warn("⚠️ Database query returned 0 rows for index: '{}'", indexName);
-                return triggerFallback(step,context,fallbackMsg);
+                log.warn("Database query returned 0 rows for index '{}'", indexName);
+                return triggerFallback(step, context, fallbackMsg);
             }
 
             EngineSearchResult bestMatch = results.get(0);
-            log.info("🎯 Evaluated top match score: {} | Text: '{}'", bestMatch.similarity(), bestMatch.answer());
-
             double bestScore = bestMatch.similarity();
             double secondScore = results.size() > 1 ? results.get(1).similarity() : 0.0;
             double actualGap = bestScore - secondScore;
 
-            log.info(
-                    "Top score={}, Second score={}, Gap={}",
-                    bestScore,
-                    secondScore,
-                    actualGap
-            );
+            log.info("Top score={}, second score={}, gap={}, answer='{}'",
+                    bestScore, secondScore, actualGap, bestMatch.answer());
 
-            log.info("📊 Confidence gap check -> Best: {}, Second: {}, Computed Gap: {}", bestScore, secondScore, actualGap);
-            // GUARD 1: Absolute Floor (Protects against total hallucinations)
-            if(bestScore < MIN_ABSOLUTE_THRESHOLD) {
-                log.warn("❌ Top score {} rejected below absolute requirement of {}", bestMatch.similarity(), MIN_ABSOLUTE_THRESHOLD);
-                return triggerFallback(step,context,fallbackMsg);
+            if (bestScore < minimumScore) {
+                log.warn("Top score {} rejected below configured threshold {}", bestScore, minimumScore);
+                return triggerFallback(step, context, fallbackMsg);
             }
 
-            // GUARD 2: The "Sure Match" Bypass (For exact Arabic-to-Arabic matches)
-            if(bestScore >= SURE_MATCH_THRESHOLD){
-                log.info("🌟 Sure Match bypassed gap check! Score: {}", bestScore);
+            if (bestScore >= SURE_MATCH_THRESHOLD) {
+                log.info("Sure match bypassed gap check. Score={}", bestScore);
                 String cleanAnswerText = bestMatch.answer();
                 storeKnowledgeOutput(step, context, cleanAnswerText);
                 return StepResult.success(cleanAnswerText, step.getMessage());
             }
 
-//            // Guard 2
-//            if (bestScore < SURE_MATCH_THRESHOLD && actualGap < MIN_RELATIVE_GAP) {
-//                log.warn("⚠️ Ambiguous result cluster detected. Actual gap of {} is less than required {}. Forcing fallback to protect domain accuracy.", actualGap, MIN_RELATIVE_GAP);
-//                return triggerFallback(step,context,fallbackMsg);
-//            }
-
-            // GUARD 3: The "Soft Match" / Cross-Lingual Zone
-            if(actualGap < MIN_RELATIVE_GAP) {
-                log.warn("⚠️ Ambiguous cluster detected (Gap {} < {}). Returning best scored answer.", actualGap, MIN_RELATIVE_GAP);
+            if (actualGap < MIN_RELATIVE_GAP) {
+                log.warn("Ambiguous cluster detected. Gap {} < {}. Returning best scored answer.",
+                        actualGap, MIN_RELATIVE_GAP);
                 String cleanAnswerText = bestMatch.answer();
                 storeKnowledgeOutput(step, context, cleanAnswerText);
                 return StepResult.success(cleanAnswerText, step.getMessage());
@@ -133,11 +121,10 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             String cleanAnswerText = bestMatch.answer();
             storeKnowledgeOutput(step, context, cleanAnswerText);
 
-            log.info("✅ Knowledge Retrieval complete (Direct Answer).");
+            log.info("Knowledge Retrieval complete.");
             return StepResult.success(cleanAnswerText, step.getMessage());
-
         } catch (Exception e) {
-            log.error("❌ Knowledge Retrieval failed", e);
+            log.error("Knowledge Retrieval failed", e);
             return StepResult.error("Knowledge Retrieval failed: " + e.getMessage());
         }
     }
@@ -146,7 +133,19 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
         storeKnowledgeOutput(step, context, fallbackMsg);
         return StepResult.success(fallbackMsg, step.getMessage());
     }
+
     private void storeKnowledgeOutput(JourneyStep step, ExecutionContext context, String answer) {
         variableContext.storeOutput(context, step, answer);
+    }
+
+    private double resolveThreshold(Double configuredThreshold) {
+        if (configuredThreshold == null) {
+            return MIN_ABSOLUTE_THRESHOLD;
+        }
+        if (configuredThreshold < 0 || configuredThreshold > 1) {
+            log.warn("Invalid knowledge threshold {}. Using default {}", configuredThreshold, MIN_ABSOLUTE_THRESHOLD);
+            return MIN_ABSOLUTE_THRESHOLD;
+        }
+        return configuredThreshold;
     }
 }

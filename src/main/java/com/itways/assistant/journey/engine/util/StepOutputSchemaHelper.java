@@ -112,7 +112,7 @@ public class StepOutputSchemaHelper {
     }
 
     public StepOutputSchema stateStoreSchema(JourneyStep step) {
-        ApiConfig config = loadApiConfig(step.getApiConfig());
+        ApiConfig config = loadApiConfig(step);
         List<OutputField> fields = new ArrayList<>();
         if (config.getVariable() != null && !config.getVariable().isBlank()) {
             fields.add(OutputField.of("state." + config.getVariable(), "Stored Value", "string"));
@@ -126,7 +126,7 @@ public class StepOutputSchemaHelper {
 
     public StepOutputSchema dataMapSchema(JourneyStep step) {
         List<OutputField> fields = new ArrayList<>();
-        ApiConfig config = loadApiConfig(step.getApiConfig());
+        ApiConfig config = loadApiConfig(step);
         if (config.getFields() instanceof List<?> list) {
             for (Object item : list) {
                 if (item instanceof Map<?, ?> map && map.get("targetField") != null) {
@@ -215,7 +215,7 @@ public class StepOutputSchemaHelper {
 
     private List<OutputField> parseDiscoveredVariables(JourneyStep step) {
         List<OutputField> fields = new ArrayList<>();
-        ApiConfig config = loadApiConfig(step.getApiConfig());
+        ApiConfig config = loadApiConfig(step);
         Object discovered = config.getDiscoveredVariables();
         if (discovered == null) {
             return fields;
@@ -234,6 +234,10 @@ public class StepOutputSchemaHelper {
         } catch (Exception ignored) {
         }
         return fields;
+    }
+
+    private ApiConfig loadApiConfig(JourneyStep step) {
+        return loadApiConfig(step != null ? step.getApiConfig() : null);
     }
 
     private ApiConfig loadApiConfig(String json) {
