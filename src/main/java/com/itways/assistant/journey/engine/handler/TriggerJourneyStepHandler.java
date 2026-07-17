@@ -9,15 +9,19 @@ import java.util.Map;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.ExecutionStatus;
 import com.itways.assistant.journey.engine.model.Journey;
 import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepDefinition;
+import com.itways.assistant.journey.engine.model.StepOutputSchema;
 import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.JourneyEngine;
 import com.itways.assistant.journey.engine.service.JourneyLookupPort;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -39,18 +43,33 @@ public class TriggerJourneyStepHandler implements StepHandler {
 
     private final JourneyLookupPort journeyLookupPort;
     private final EngineUtils engineUtils;
+    private final VariableContext variableContext;
+    private final StepOutputSchemaHelper schemaHelper;
     private final JourneyEngine journeyEngine;
 
     public TriggerJourneyStepHandler(JourneyLookupPort journeyLookupPort, EngineUtils engineUtils,
+                                     VariableContext variableContext, StepOutputSchemaHelper schemaHelper,
                                      @Lazy JourneyEngine journeyEngine) {
         this.journeyLookupPort = journeyLookupPort;
         this.engineUtils = engineUtils;
+        this.variableContext = variableContext;
+        this.schemaHelper = schemaHelper;
         this.journeyEngine = journeyEngine;
     }
 
     @Override
     public String getType() {
         return "TRIGGER_JOURNEY";
+    }
+
+    @Override
+    public StepDefinition describe() {
+        return schemaHelper.triggerJourneyDefinition();
+    }
+
+    @Override
+    public StepOutputSchema describeOutputs(JourneyStep step) {
+        return schemaHelper.genericOutputSchema("TRIGGER_JOURNEY", "Triggered Journey Result");
     }
 
     @Override
@@ -164,12 +183,7 @@ public class TriggerJourneyStepHandler implements StepHandler {
                 ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
                 : "Triggered journey: " + intent;
 
-        context.addStepResult(step.getStepOrder(), outputData);
-        context.setVariable("step" + step.getStepOrder(), outputData);
-        context.setVariable("lastStep", outputData);
-        if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-            context.setVariable(engineUtils.sanitizeKey(step.getStepName()), outputData);
-        }
+        variableContext.storeOutput(context, step, outputData);
         context.setStatus(ExecutionStatus.RUNNING);
 
         Map<String, Object> metadata = new HashMap<>();

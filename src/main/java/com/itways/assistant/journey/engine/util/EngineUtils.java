@@ -3,6 +3,7 @@ package com.itways.assistant.journey.engine.util;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.expression.MapAccessor;
 import org.springframework.expression.ExpressionParser;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
@@ -45,11 +46,9 @@ public class EngineUtils {
             String clean = expression.trim();
             if (clean.startsWith("{{") && clean.endsWith("}}")) {
                 clean = clean.substring(2, clean.length() - 2);
-            } else if (clean.startsWith("{") && clean.endsWith("}")) {
-                clean = clean.substring(1, clean.length() - 1);
             }
             StandardEvaluationContext evalContext = new StandardEvaluationContext(context);
-            evalContext.addPropertyAccessor(new org.springframework.context.expression.MapAccessor());
+            evalContext.addPropertyAccessor(new MapAccessor());
             return parser.parseExpression(clean).getValue(evalContext);
         } catch (Exception e) {
             return resolveValue(expression, context);
@@ -62,24 +61,29 @@ public class EngineUtils {
     }
 
     public String replacePlaceholders(String text, Map<String, Object> context) {
-        if (text == null || (!text.contains("{") && !text.contains("<%"))) {
+        if (text == null) {
+            return null;
+        }
+        if (!text.contains("{{") && !text.contains("{") && !text.contains("<%")) {
             return text;
         }
-        String result = text;
+        StringBuilder result = new StringBuilder();
         Matcher matcher = PLACEHOLDER_PATTERN.matcher(text);
         while (matcher.find()) {
-            String fullMatch = matcher.group(0);
             String key = matcher.group(1) != null ? matcher.group(1)
-                       : matcher.group(2) != null ? matcher.group(2)
-                       : matcher.group(3);
+                    : (matcher.group(2) != null ? matcher.group(2) : matcher.group(3));
             Object val = resolveValue(key, context);
-            String strVal = (val != null) ? val.toString() : "";
-            result = result.replace(fullMatch, strVal);
+            String strVal = val != null ? val.toString() : "";
+            matcher.appendReplacement(result, Matcher.quoteReplacement(strVal));
         }
-        return result;
+        matcher.appendTail(result);
+        return result.toString();
     }
 
     public Object resolveValue(String path, Map<String, Object> context) {
+        if (path == null || path.isEmpty()) {
+            return null;
+        }
         String[] parts = path.split("\\.");
         Object current = context;
         for (String part : parts) {

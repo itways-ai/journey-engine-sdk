@@ -1,18 +1,21 @@
 package com.itways.assistant.journey.engine.handler;
 
-import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
 
 import org.springframework.stereotype.Component;
 
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.ExecutionStatus;
 import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepDefinition;
+import com.itways.assistant.journey.engine.model.StepOutputSchema;
 import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +26,8 @@ import lombok.extern.slf4j.Slf4j;
 public class DelayStepHandler implements StepHandler {
 
     private final EngineUtils engineUtils;
+    private final VariableContext variableContext;
+    private final StepOutputSchemaHelper schemaHelper;
 
     @Override
     public String getType() {
@@ -30,64 +35,46 @@ public class DelayStepHandler implements StepHandler {
     }
 
     @Override
+    public StepDefinition describe() {
+        return schemaHelper.delayDefinition();
+    }
+
+    @Override
+    public StepOutputSchema describeOutputs(JourneyStep step) {
+        return schemaHelper.genericOutputSchema("DELAY", "Delay Result");
+    }
+
+    @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
-        Integer duration = config.getDuration() != null ? config.getDuration() : 60;
+        Integer duration = config.getDuration() != null ? config.getDuration() : 5;
         String unit = config.getUnit() != null ? config.getUnit().toUpperCase() : "SECONDS";
 
-        String resumeAtKey = "delay_resume_at_" + step.getStepOrder();
-
-        // On resume: check whether the delay window has actually elapsed
-        if (context.getVariables().containsKey(resumeAtKey)) {
-            // resumeOnEvent = true means any incoming message breaks the delay early
-            boolean resumeOnEvent = Boolean.TRUE.equals(config.getResumeOnEvent());
-            LocalDateTime resumeAt = LocalDateTime.parse((String) context.getVariables().get(resumeAtKey));
-            if (!resumeOnEvent && LocalDateTime.now().isBefore(resumeAt)) {
-                long secondsLeft = java.time.Duration.between(LocalDateTime.now(), resumeAt).getSeconds();
-                log.info("⏳ Delay Step '{}' — still waiting, {} second(s) remaining", step.getStepName(), secondsLeft);
-                String stillWaiting = "Still waiting: " + secondsLeft + " second(s) remaining";
-                Map<String, Object> metadata = new HashMap<>();
-                metadata.put("interactionType", "TEMPORAL_PAUSE");
-                metadata.put("resumeAt", resumeAt.toString());
-                metadata.put("secondsRemaining", secondsLeft);
-                return StepResult.waiting(stillWaiting, metadata);
-            }
-            // Delay has elapsed — clean up and proceed
-            context.getVariables().remove(resumeAtKey);
-            log.info("✅ Delay Step '{}' complete — {} {} elapsed", step.getStepName(), duration, unit);
-
-            Map<String, Object> resultData = Map.of("waited", duration, "unit", unit);
-            context.addStepResult(step.getStepOrder(), resultData);
-            context.setVariable("step" + step.getStepOrder(), resultData);
-            context.setVariable("lastStep", resultData);
-            String safeName = engineUtils.sanitizeKey(
-                    step.getStepName() != null ? step.getStepName() : ("step" + step.getStepOrder()));
-            context.setVariable(safeName, resultData);
-
-            String successMessage = step.getMessage() != null && !step.getMessage().isEmpty()
-                    ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
-                    : "Delay completed.";
-            return StepResult.success(resultData, successMessage);
+        String delayFinishedKey = "delay_finished_" + step.getStepOrder();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> runtime = (Map<String, Object>) context.getVariables().computeIfAbsent("runtime", k -> new HashMap<>());
+        if (Boolean.TRUE.equals(runtime.get(delayFinishedKey))) {
+            runtime.remove(delayFinishedKey);
+            Map<String, Object> result = Map.of("waited", duration, "unit", unit);
+            variableContext.storeOutput(context, step, result);
+            return StepResult.success(result, "Delay completed.");
         }
 
-        // First encounter: compute resumeAt, persist it in context variables, and pause
         context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);
-
-        LocalDateTime resumeAt = LocalDateTime.now();
-        if ("MINUTES".equals(unit))     resumeAt = resumeAt.plusMinutes(duration);
-        else if ("HOURS".equals(unit))  resumeAt = resumeAt.plusHours(duration);
-        else                            resumeAt = resumeAt.plusSeconds(duration);
-
-        // Store in variables so it survives context serialisation/deserialisation
-        context.setVariable(resumeAtKey, resumeAt.toString());
+        java.time.LocalDateTime resumeAt = java.time.LocalDateTime.now();
+        if (unit.equals("MINUTES")) {
+            resumeAt = resumeAt.plusMinutes(duration);
+        } else if (unit.equals("HOURS")) {
+            resumeAt = resumeAt.plusHours(duration);
+        } else {
+            resumeAt = resumeAt.plusSeconds(duration);
+        }
 
         Map<String, Object> metadata = new HashMap<>();
-        metadata.put("interactionType", "TEMPORAL_PAUSE");
+        metadata.put("type", "TEMPORAL_PAUSE");
         metadata.put("resumeAt", resumeAt.toString());
         metadata.put("duration", duration);
         metadata.put("unit", unit);
-
-        log.info("⏳ Delay Step '{}' — pausing for {} {}, resume after {}", step.getStepName(), duration, unit, resumeAt);
 
         String prompt = (step.getMessage() != null && !step.getMessage().isEmpty())
                 ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
@@ -95,5 +82,5 @@ public class DelayStepHandler implements StepHandler {
 
         return StepResult.waiting(prompt, metadata);
     }
-}
 
+}

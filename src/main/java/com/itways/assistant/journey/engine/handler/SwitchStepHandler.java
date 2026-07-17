@@ -1,16 +1,16 @@
 package com.itways.assistant.journey.engine.handler;
 
-import java.util.LinkedHashMap;
-import java.util.Map;
-
 import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
 
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepDefinition;
+import com.itways.assistant.journey.engine.model.StepOutputSchema;
 import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
 import lombok.RequiredArgsConstructor;
 
@@ -19,6 +19,8 @@ import lombok.RequiredArgsConstructor;
 public class SwitchStepHandler implements StepHandler {
 
     private final EngineUtils engineUtils;
+    private final VariableContext variableContext;
+    private final StepOutputSchemaHelper schemaHelper;
 
     @Override
     public String getType() {
@@ -26,29 +28,19 @@ public class SwitchStepHandler implements StepHandler {
     }
 
     @Override
+    public StepDefinition describe() {
+        return schemaHelper.switchDefinition();
+    }
+
+    @Override
+    public StepOutputSchema describeOutputs(JourneyStep step) {
+        return schemaHelper.switchSchema();
+    }
+
+    @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
-        String expression = step.getConditionExpression();
-        if (!StringUtils.hasText(expression)) {
-            return StepResult.error("SWITCH: conditionExpression is required");
-        }
-
-        Object switchVal = engineUtils.evaluateExpression(expression, context.getVariables());
-
-        Map<String, Object> resultData = new LinkedHashMap<>();
-        resultData.put("value", switchVal);
-
-        context.addStepResult(step.getStepOrder(), resultData);
-        context.setVariable("step" + step.getStepOrder(), switchVal);
-        context.setVariable("lastStep", switchVal);
-        if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-            context.setVariable(engineUtils.sanitizeKey(step.getStepName()), switchVal);
-        }
-
-        String successMessage = null;
-        if (StringUtils.hasText(step.getMessage())) {
-            successMessage = engineUtils.replacePlaceholders(step.getMessage(), context.getVariables());
-        }
-
-        return StepResult.success(resultData, successMessage);
+        Object switchVal = engineUtils.evaluateExpression(step.getConditionExpression(), context.getVariables());
+        variableContext.storeOutput(context, step, switchVal);
+        return StepResult.success(switchVal);
     }
 }

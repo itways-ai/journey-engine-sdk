@@ -1,10 +1,12 @@
 package com.itways.assistant.journey.engine.handler;
 
 import com.itways.assistant.ai.service.impl.LocalEmbeddingEngine;
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.KnowledgeBasePort;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -16,14 +18,17 @@ import java.util.List;
 @RequiredArgsConstructor
 public class KnowledgeRetrievalStepHandler implements StepHandler {
 
-    private static final int    DEFAULT_LIMIT            = 5;
-    private static final double MIN_ABSOLUTE_THRESHOLD   = 0.78;
-    private static final double MIN_RELATIVE_GAP         = 0.04;
-    private static final double SURE_MATCH_THRESHOLD     = 0.85;
+    private static final int    DEFAULT_LIMIT     = 5;
+    private static final double MIN_ABSOLUTE_THRESHOLD = 0.70;
+    private static final double MIN_RELATIVE_GAP       = 0.04;
 
-    private final EngineUtils          engineUtils;
+    private static final double SURE_MATCH_THRESHOLD = 0.85;
+
+    private final EngineUtils        engineUtils;
+    private final VariableContext    variableContext;
+    private final StepOutputSchemaHelper schemaHelper;
     private final LocalEmbeddingEngine embeddingEngine;
-    private final KnowledgeBasePort    knowledgeBasePort;
+    private final KnowledgeBasePort  knowledgeBasePort;
 
     @Override
     public String getType() {
@@ -31,14 +36,28 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
     }
 
     @Override
+    public StepDefinition describe() {
+        return schemaHelper.knowledgeDefinition();
+    }
+
+    @Override
+    public StepOutputSchema describeOutputs(JourneyStep step) {
+        return schemaHelper.knowledgeRetrievalSchema();
+    }
+
+    @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         try {
-            ApiConfig config    = engineUtils.parseApiConfig(step.getApiConfig());
-            String    accountId = context.getAccountId();
+            ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
+            String accountId = context.getAccountId();
 
+
+            // 1. Query = user's message (context variable "text").
+            //    Optionally overridable via apiConfig.query with {{placeholder}} syntax,
+            //    but for standard FAQ flows the user's input IS the query.
             String rawQuery = (config.getQuery() != null && !config.getQuery().isBlank())
                     ? config.getQuery()
-                    : "{{text}}";
+                    : "{{inputs.text}}";
 
             String query = engineUtils.replacePlaceholders(rawQuery, context.getVariables());
 
@@ -51,19 +70,13 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
                 return StepResult.error("KNOWLEDGE_RETRIEVAL: indexName is required");
             }
 
-            int    limit             = DEFAULT_LIMIT;
-            double absoluteThreshold = (config.getThreshold() != null && config.getThreshold() > 0)
-                    ? config.getThreshold()
-                    : MIN_ABSOLUTE_THRESHOLD;
-
-            String resolvedMessage = step.getMessage() != null
-                    ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
-                    : null;
+            int    limit     = config.getLimit()     != null ? config.getLimit()     : DEFAULT_LIMIT;
 
             log.info("🔍 Knowledge Scored Retrieval: index='{}', query='{}'", indexName, query);
 
             float[] queryVector = embeddingEngine.embed(query);
 
+            // Vector search via port (implemented in journey-service)
             List<EngineSearchResult> results = knowledgeBasePort.search(
                     accountId, indexName, queryVector, limit);
 
@@ -71,78 +84,77 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
 
             if (results.isEmpty()) {
                 log.warn("⚠️ Database query returned 0 rows for index: '{}'", indexName);
-                return triggerFallback(step, context, fallbackMsg, resolvedMessage);
+                return triggerFallback(step,context,fallbackMsg);
             }
 
-            EngineSearchResult bestMatch   = results.get(0);
-            double             bestScore   = bestMatch.similarity();
-            double             secondScore = results.size() > 1 ? results.get(1).similarity() : 0.0;
-            double             actualGap   = bestScore - secondScore;
+            EngineSearchResult bestMatch = results.get(0);
+            log.info("🎯 Evaluated top match score: {} | Text: '{}'", bestMatch.similarity(), bestMatch.answer());
 
-            log.info("🎯 Top score={}, Second score={}, Gap={}", bestScore, secondScore, actualGap);
+            double bestScore = bestMatch.similarity();
+            double secondScore = results.size() > 1 ? results.get(1).similarity() : 0.0;
+            double actualGap = bestScore - secondScore;
 
-            // GUARD 1: Absolute Floor
-            if (bestScore < absoluteThreshold) {
-                log.warn("❌ Top score {} rejected below absolute threshold of {}", bestScore, absoluteThreshold);
-                return triggerFallback(step, context, fallbackMsg, resolvedMessage);
+            log.info(
+                    "Top score={}, Second score={}, Gap={}",
+                    bestScore,
+                    secondScore,
+                    actualGap
+            );
+
+            log.info("📊 Confidence gap check -> Best: {}, Second: {}, Computed Gap: {}", bestScore, secondScore, actualGap);
+            // GUARD 1: Absolute Floor (Protects against total hallucinations)
+            if(bestScore < MIN_ABSOLUTE_THRESHOLD) {
+                log.warn("❌ Top score {} rejected below absolute requirement of {}", bestMatch.similarity(), MIN_ABSOLUTE_THRESHOLD);
+                return triggerFallback(step,context,fallbackMsg);
             }
 
-            // GUARD 2: Sure Match Bypass
-            if (bestScore >= SURE_MATCH_THRESHOLD) {
+            // GUARD 2: The "Sure Match" Bypass (For exact Arabic-to-Arabic matches)
+            if(bestScore >= SURE_MATCH_THRESHOLD){
                 log.info("🌟 Sure Match bypassed gap check! Score: {}", bestScore);
-                String answer = bestMatch.answer();
-                setContextVariables(step, context, answer, true);
-                return StepResult.success(answer, resolvedMessage);
+                String cleanAnswerText = bestMatch.answer();
+                storeKnowledgeOutput(step, context, cleanAnswerText, true);
+                return StepResult.success(cleanAnswerText, step.getMessage());
             }
 
-            // GUARD 3: Soft Match / Cross-Lingual Zone
-            if (actualGap < MIN_RELATIVE_GAP) {
-                log.warn("⚠️ Ambiguous cluster detected (Gap {} < {}). Resolving via Context Aggregation.", actualGap, MIN_RELATIVE_GAP);
-                StringBuilder aggregatedResult = new StringBuilder();
-                for (int i = 0; i < Math.min(results.size(), 3); i++) {
-                    EngineSearchResult current = results.get(i);
-                    if ((bestScore - current.similarity()) <= MIN_RELATIVE_GAP) {
-                        aggregatedResult.append(current.answer());
-                    }
-                }
-                return handleSoftMatch(step, context, aggregatedResult.toString(), resolvedMessage);
+//            // Guard 2
+//            if (bestScore < SURE_MATCH_THRESHOLD && actualGap < MIN_RELATIVE_GAP) {
+//                log.warn("⚠️ Ambiguous result cluster detected. Actual gap of {} is less than required {}. Forcing fallback to protect domain accuracy.", actualGap, MIN_RELATIVE_GAP);
+//                return triggerFallback(step,context,fallbackMsg);
+//            }
+
+            // GUARD 3: The "Soft Match" / Cross-Lingual Zone
+            if(actualGap < MIN_RELATIVE_GAP) {
+                log.warn("⚠️ Ambiguous cluster detected (Gap {} < {}). Returning best scored answer.", actualGap, MIN_RELATIVE_GAP);
+                String cleanAnswerText = bestMatch.answer();
+                storeKnowledgeOutput(step, context, cleanAnswerText, true);
+                return StepResult.success(cleanAnswerText, step.getMessage());
             }
 
-            // Direct answer (0.78 – 0.85 with sufficient gap)
-            String answer = bestMatch.answer();
-            setContextVariables(step, context, answer, true);
+            String cleanAnswerText = bestMatch.answer();
+            storeKnowledgeOutput(step, context, cleanAnswerText, true);
+
             log.info("✅ Knowledge Retrieval complete (Direct Answer).");
-            return StepResult.success(answer, resolvedMessage);
+            return StepResult.success(cleanAnswerText, step.getMessage());
 
         } catch (Exception e) {
             log.error("❌ Knowledge Retrieval failed", e);
-            return StepResult.error("KNOWLEDGE_RETRIEVAL: " + e.getMessage());
+            return StepResult.error("Knowledge Retrieval failed: " + e.getMessage());
         }
     }
 
-    private void setContextVariables(JourneyStep step, ExecutionContext context, String answer, boolean found) {
-        context.addStepResult(step.getStepOrder(), answer);
-        context.setVariable("step" + step.getStepOrder(), answer);
-        context.setVariable("lastStep", answer);
-        context.setVariable("retrieved_knowledge", answer);
+    private StepResult triggerFallback(JourneyStep step, ExecutionContext context, String fallbackMsg) {
+        storeKnowledgeOutput(step, context, fallbackMsg, false);
+        return StepResult.success(fallbackMsg, step.getMessage());
+    }
+
+    private void storeKnowledgeOutput(JourneyStep step, ExecutionContext context, String answer, boolean found) {
+        variableContext.storeOutput(context, step, answer);
+        variableContext.writeStepField(context, step, "found", found);
+        // Flat flags for legacy conditions (knowledge_found / stepN_found)
         context.setVariable("knowledge_found", found);
         context.setVariable("step" + step.getStepOrder() + "_found", found);
         if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-            String safeName = engineUtils.sanitizeKey(step.getStepName());
-            context.setVariable(safeName + "_result", answer);
-            context.setVariable(safeName + "_found", found);
+            context.setVariable(engineUtils.sanitizeKey(step.getStepName()) + "_found", found);
         }
     }
-
-    private StepResult triggerFallback(JourneyStep step, ExecutionContext context, String fallbackMsg, String resolvedMessage) {
-        setContextVariables(step, context, fallbackMsg, false);
-        return StepResult.success(fallbackMsg, resolvedMessage);
-    }
-
-    private StepResult handleSoftMatch(JourneyStep step, ExecutionContext context, String answer, String resolvedMessage) {
-        setContextVariables(step, context, answer, true);
-        return StepResult.success(answer, resolvedMessage);
-    }
 }
-
-

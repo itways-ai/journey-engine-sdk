@@ -2,11 +2,15 @@ package com.itways.assistant.journey.engine.handler;
 
 import org.springframework.stereotype.Component;
 
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepDefinition;
+import com.itways.assistant.journey.engine.model.StepOutputSchema;
 import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
 import lombok.RequiredArgsConstructor;
 
@@ -15,6 +19,8 @@ import lombok.RequiredArgsConstructor;
 public class ResponseStepHandler implements StepHandler {
 
     private final EngineUtils engineUtils;
+    private final VariableContext variableContext;
+    private final StepOutputSchemaHelper schemaHelper;
 
     @Override
     public String getType() {
@@ -22,20 +28,21 @@ public class ResponseStepHandler implements StepHandler {
     }
 
     @Override
+    public StepDefinition describe() {
+        return schemaHelper.responseDefinition();
+    }
+
+    @Override
+    public StepOutputSchema describeOutputs(JourneyStep step) {
+        return schemaHelper.responseSchema(step);
+    }
+
+    @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         String resp = engineUtils.replacePlaceholders(step.getActionTarget(), context.getVariables());
 
-        context.addStepResult(step.getStepOrder(), resp);
-        context.setVariable("step" + step.getStepOrder(), resp);
-        context.setVariable("lastStep", resp);
-        if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-            context.setVariable(engineUtils.sanitizeKey(step.getStepName()), resp);
-        }
+        variableContext.storeOutput(context, step, resp);
 
-        return StepResult.builder()
-                .status("SUCCESS")
-                .message(resp)
-                .data(resp)
-                .build();
+        return StepResult.success(resp, resp);
     }
 }

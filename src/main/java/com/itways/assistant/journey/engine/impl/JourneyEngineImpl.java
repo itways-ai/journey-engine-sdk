@@ -1,6 +1,7 @@
 package com.itways.assistant.journey.engine.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.handler.TriggerJourneyStepHandler;
 import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.JourneyEngine;
@@ -21,35 +22,63 @@ public class JourneyEngineImpl implements JourneyEngine {
 
     private final StepHandlerRegistry handlerRegistry;
     private final EngineUtils engineUtils;
+    private final VariableContext variableContext;
     private final ObjectMapper objectMapper;
 
     @Override
     public Map<String, Object> start(Journey journey, String accountId, Map<String, Object> initialParams) {
-        Map<String, Object> variables = new HashMap<>(initialParams != null ? initialParams : Map.of());
-        // Seed call stack so TRIGGER_JOURNEY can detect cycles without needing the parent Journey object
-        if (!variables.containsKey(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK)
-                && journey.getTriggerIntent() != null
-                && !journey.getTriggerIntent().isBlank()) {
-            variables.put(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK,
-                    new ArrayList<>(List.of(journey.getTriggerIntent())));
-        }
-
         ExecutionContext context = ExecutionContext.builder()
                 .journeyId(journey.getId())
                 .accountId(accountId)
                 .currentStepIndex(-1)
                 .status(ExecutionStatus.RUNNING)
-                .variables(variables)
+                .variables(new HashMap<>())
                 .startedAt(new Date())
                 .build();
 
+        Map<String, Object> params = initialParams != null ? initialParams : Map.of();
+        if (isStructuredVariableMap(params)) {
+            context.setVariables(shallowCopyVariables(params));
+            variableContext.ensureStructure(context);
+        } else {
+            variableContext.mergeInputs(context, params);
+        }
+
+        // Seed call stack so TRIGGER_JOURNEY can detect cycles without needing the parent Journey object
+        if (!context.getVariables().containsKey(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK)
+                && journey.getTriggerIntent() != null
+                && !journey.getTriggerIntent().isBlank()) {
+            context.setVariable(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK,
+                    new ArrayList<>(List.of(journey.getTriggerIntent())));
+        }
+
         return execute(journey, context);
+    }
+
+    private boolean isStructuredVariableMap(Map<String, Object> params) {
+        return params.get("inputs") instanceof Map && params.get("steps") instanceof Map;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> shallowCopyVariables(Map<String, Object> source) {
+        Map<String, Object> copy = new HashMap<>();
+        for (Map.Entry<String, Object> e : source.entrySet()) {
+            Object val = e.getValue();
+            if (val instanceof Map<?, ?> m) {
+                copy.put(e.getKey(), new HashMap<>((Map<String, Object>) m));
+            } else if (val instanceof List<?> list) {
+                copy.put(e.getKey(), new ArrayList<>(list));
+            } else {
+                copy.put(e.getKey(), val);
+            }
+        }
+        return copy;
     }
 
     @Override
     public Map<String, Object> resume(Journey journey, ExecutionContext context, Map<String, Object> inputParams) {
         Map<String, Object> pending = inputParams != null ? new HashMap<>(inputParams) : new HashMap<>();
-        context.getVariables().putAll(pending);
+        variableContext.mergeInputs(context, pending);
         context.setVariable(TriggerJourneyStepHandler.PENDING_RESUME_INPUT, pending);
         context.setStatus(ExecutionStatus.RUNNING);
         Map<String, Object> result = execute(journey, context);
@@ -76,7 +105,7 @@ public class JourneyEngineImpl implements JourneyEngine {
         try {
             sortedSteps = JourneyStepGraph.sortSteps(steps);
         } catch (IllegalStateException e) {
-            log.error("❌ Journey '{}' has a cyclic step graph — aborting execution: {}",
+            log.error("Journey '{}' has a cyclic step graph — aborting execution: {}",
                     journey.getTriggerIntent(), e.getMessage());
             context.setStatus(ExecutionStatus.ERROR);
             result.put("status", "ERROR");
@@ -154,12 +183,10 @@ public class JourneyEngineImpl implements JourneyEngine {
                 mergeStepMetadata(viewResult, metadata);
                 stepResults.add(viewResult);
                 context.setCurrentStepIndex(stepOrder);
-                context.addStepResult(stepOrder, stepResult.getData());
-
-                String safeName = engineUtils
-                        .sanitizeKey(step.getStepName() != null ? step.getStepName() : ("step" + stepOrder));
-                context.setVariable(safeName, stepResult.getData());
-
+                // Handlers store output via VariableContext.storeOutput; ensure stepResults map is set
+                if (context.getStepResults().get(stepOrder) == null && stepResult.getData() != null) {
+                    context.addStepResult(stepOrder, stepResult.getData());
+                }
                 i++;
             } else if ("WAITING".equals(stepResult.getStatus())) {
                 if (!skipSelfView) {
@@ -167,7 +194,6 @@ public class JourneyEngineImpl implements JourneyEngine {
                     mergeStepMetadata(viewResult, metadata);
                     stepResults.add(viewResult);
                 }
-                // Pause execution
                 result.put("status", "WAITING");
                 result.put("stepResults", stepResults);
                 result.put("context", context);
@@ -177,16 +203,9 @@ public class JourneyEngineImpl implements JourneyEngine {
                 return result;
             } else if ("JUMP".equals(stepResult.getStatus())) {
                 int targetOrder = (Integer) stepResult.getMetadata().get("targetOrder");
+                variableContext.clearStepOutputsFromOrder(context, targetOrder);
 
-                // Clear `stepResults` sequencing >= targetOrder
-                List<Integer> ordersToRemove = new java.util.ArrayList<>(context.getStepResults().keySet());
-                for (Integer order : ordersToRemove) {
-                    if (order >= targetOrder) {
-                        context.getStepResults().remove(order);
-                    }
-                }
-
-                // Keep variables alive if they were also created by a step < targetOrder
+                // Clear legacy flat step* / sanitized name vars for steps >= targetOrder
                 java.util.Set<String> safeNamesToKeep = steps.stream()
                         .filter(s -> s.getStepOrder() < targetOrder)
                         .map(s -> engineUtils.sanitizeKey(s.getStepName() != null ? s.getStepName() : ("step" + s.getStepOrder())))
@@ -198,12 +217,12 @@ public class JourneyEngineImpl implements JourneyEngine {
                         if (!safeNamesToKeep.contains(name)) {
                             context.getVariables().remove(name);
                         }
+                        context.getVariables().remove("step" + s.getStepOrder());
                     }
                 }
-                context.getVariables().keySet().removeIf(k -> k.startsWith("step") && ordersToRemove.stream().anyMatch(o -> o >= targetOrder && k.equals("step" + o)));
 
                 context.setCurrentStepIndex(targetOrder - 1);
-                i = 0; // Reset loop to run from start
+                i = 0;
                 continue;
             } else {
                 viewResult.put("message", stepResult.getMessage());
@@ -212,13 +231,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                 if (step.isContinueOnError()) {
                     context.addStepResult(stepOrder, "FAILED");
                     context.setCurrentStepIndex(stepOrder);
-
-                    // Propagate "FAILED" status to variables so subsequent steps don't see nulls
-                    context.setVariable("step" + stepOrder, "FAILED");
-                    context.setVariable("lastStep", "FAILED");
-                    if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-                        context.setVariable(engineUtils.sanitizeKey(step.getStepName()), "FAILED");
-                    }
+                    variableContext.writeStepOutput(context, step, "FAILED");
                 } else {
                     context.setStatus(ExecutionStatus.ERROR);
                     break;
