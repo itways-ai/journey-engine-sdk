@@ -1,7 +1,6 @@
 package com.itways.assistant.journey.engine.handler;
 
 import org.springframework.stereotype.Component;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
@@ -19,7 +18,6 @@ import java.util.ArrayList;
 public class StateStoreStepHandler implements StepHandler {
 
     private final EngineUtils engineUtils;
-    private final ObjectMapper objectMapper;
 
     @Override
     public String getType() {
@@ -29,54 +27,60 @@ public class StateStoreStepHandler implements StepHandler {
     @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         try {
-            ApiConfig config = loadApiConfig(step.getApiConfig());
+            ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
             String variableName = config.getVariable();
             String operation = config.getOperation() != null ? config.getOperation().toUpperCase() : "SET";
-            String sourceValue = engineUtils.replacePlaceholders(config.getSource() != null ? config.getSource() : "", context.getVariables());
+            Object resolvedSource = engineUtils.resolveSourceValue(
+                    config.getSource() != null ? config.getSource() : "", context.getVariables());
 
-            if (variableName == null || variableName.isEmpty()) {
-                return StepResult.error("State variable name is missing");
+            if (variableName == null || variableName.isBlank()) {
+                return StepResult.error("STATE_STORE: variable name is required");
             }
 
-            log.info("💾 State Store Step: '{}' - {} {} with value: {}", step.getStepName(), operation, variableName, sourceValue);
+            log.info("STATE_STORE step '{}' — {} '{}' = {}", step.getStepName(), operation, variableName, resolvedSource);
 
-            Object finalValue = sourceValue;
+            Object finalValue = resolvedSource;
 
             switch (operation) {
                 case "APPEND":
                     Object existing = context.getVariables().get(variableName);
-                    List<Object> list = (existing instanceof List) ? (List<Object>) existing : new ArrayList<>();
-                    list.add(sourceValue);
+                    List<Object> list = (existing instanceof List)
+                            ? new ArrayList<>((List<Object>) existing)
+                            : new ArrayList<>();
+                    list.add(resolvedSource);
                     finalValue = list;
                     break;
                 case "INCREMENT":
                     Object current = context.getVariables().get(variableName);
                     int val = (current instanceof Number) ? ((Number) current).intValue() : 0;
                     try {
-                        val += Integer.parseInt(sourceValue);
-                    } catch (Exception e) { val += 1; }
+                        val += (resolvedSource instanceof Number n) ? n.intValue() : Integer.parseInt(String.valueOf(resolvedSource));
+                    } catch (Exception e) {
+                        val += 1;
+                    }
                     finalValue = val;
                     break;
                 case "SET":
                 default:
-                    finalValue = sourceValue;
+                    finalValue = resolvedSource;
                     break;
             }
 
             context.setVariable(variableName, finalValue);
-            return StepResult.success(finalValue, step.getMessage());
+            context.setVariable("step" + step.getStepOrder(), finalValue);
+            context.setVariable("lastStep", finalValue);
+
+            String resolvedMessage = step.getMessage() != null && !step.getMessage().isBlank()
+                    ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
+                    : null;
+
+            log.info("STATE_STORE step '{}' stored '{}' = {}", step.getStepName(), variableName, finalValue);
+
+            return StepResult.success(finalValue, resolvedMessage);
         } catch (Exception e) {
-            log.error("❌ State Store failed", e);
-            return StepResult.error("State Persistence Failure: " + e.getMessage());
+            log.error("STATE_STORE failed", e);
+            return StepResult.error("STATE_STORE: " + e.getMessage());
         }
     }
 
-    private ApiConfig loadApiConfig(String json) {
-        try {
-            if (json == null || json.isEmpty()) return new ApiConfig();
-            return objectMapper.readValue(json, ApiConfig.class);
-        } catch (Exception e) {
-            return new ApiConfig();
-        }
-    }
 }

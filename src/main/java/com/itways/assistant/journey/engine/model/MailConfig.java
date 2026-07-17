@@ -14,6 +14,7 @@ public class MailConfig {
     private Integer smtpPort;
     private String username;
     private String password;
+    private String from;
     private String to;
     private String subject;
     private String body;

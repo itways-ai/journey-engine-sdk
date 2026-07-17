@@ -24,6 +24,7 @@ public class ApiConfig {
     private boolean allowResubmit = false;
     @Builder.Default
     private String inputMode = "FREE_TEXT"; // FREE_TEXT, STRUCTURED, INTERACTIVE
+    private String confirmationMessage; // INTERACTIVE: shown in phase 2 before form confirmation
     private Object fields;
     private Object rules;
 
@@ -34,6 +35,7 @@ public class ApiConfig {
     private Double threshold;
 
     // Elite: Human Approval
+    private String approvalMode; // SELF_CONFIRM | STAKEHOLDER
     private String stakeholders;
     private String instruction;
     private Integer timeout;
@@ -50,6 +52,7 @@ public class ApiConfig {
     // Elite: Timing
     private Integer duration;
     private String unit;
+    private Boolean resumeOnEvent; // if true, any incoming message breaks the delay early
 
     // Elite: OCR / Document Insight
     private String strategy;

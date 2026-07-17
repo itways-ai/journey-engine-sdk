@@ -1,6 +1,5 @@
 package com.itways.assistant.journey.engine.handler;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.ai.service.impl.LocalEmbeddingEngine;
 import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.KnowledgeBasePort;
@@ -17,21 +16,14 @@ import java.util.List;
 @RequiredArgsConstructor
 public class KnowledgeRetrievalStepHandler implements StepHandler {
 
-    private static final int    DEFAULT_LIMIT     = 5;
-    private static final double MIN_ABSOLUTE_THRESHOLD = 0.78;
-    private static final double MIN_RELATIVE_GAP       = 0.04;
+    private static final int    DEFAULT_LIMIT            = 5;
+    private static final double MIN_ABSOLUTE_THRESHOLD   = 0.78;
+    private static final double MIN_RELATIVE_GAP         = 0.04;
+    private static final double SURE_MATCH_THRESHOLD     = 0.85;
 
-    private static final double SURE_MATCH_THRESHOLD= 0.85;
-
-//    private static final String SYNTHESIS_SYSTEM_PROMPT =
-//            "You are a Knowledge Assistant. You have been given relevant excerpts from a knowledge base. " +
-//            "Use ONLY the provided excerpts to answer the user's question. " +
-//            "If the excerpts do not contain enough information to answer, say so clearly. " +
-//            "Do not make up information.";
-    private final EngineUtils        engineUtils;
-    private final ObjectMapper       objectMapper;
+    private final EngineUtils          engineUtils;
     private final LocalEmbeddingEngine embeddingEngine;
-    private final KnowledgeBasePort  knowledgeBasePort;
+    private final KnowledgeBasePort    knowledgeBasePort;
 
     @Override
     public String getType() {
@@ -41,13 +33,9 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
     @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
         try {
-            ApiConfig config = loadApiConfig(step.getApiConfig());
-            String accountId = context.getAccountId();
+            ApiConfig config    = engineUtils.parseApiConfig(step.getApiConfig());
+            String    accountId = context.getAccountId();
 
-
-            // 1. Query = user's message (context variable "text").
-            //    Optionally overridable via apiConfig.query with {{placeholder}} syntax,
-            //    but for standard FAQ flows the user's input IS the query.
             String rawQuery = (config.getQuery() != null && !config.getQuery().isBlank())
                     ? config.getQuery()
                     : "{{text}}";
@@ -63,13 +51,19 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
                 return StepResult.error("KNOWLEDGE_RETRIEVAL: indexName is required");
             }
 
-            int    limit     = config.getLimit()     != null ? config.getLimit()     : DEFAULT_LIMIT;
+            int    limit             = DEFAULT_LIMIT;
+            double absoluteThreshold = (config.getThreshold() != null && config.getThreshold() > 0)
+                    ? config.getThreshold()
+                    : MIN_ABSOLUTE_THRESHOLD;
+
+            String resolvedMessage = step.getMessage() != null
+                    ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
+                    : null;
 
             log.info("🔍 Knowledge Scored Retrieval: index='{}', query='{}'", indexName, query);
 
             float[] queryVector = embeddingEngine.embed(query);
 
-            // Vector search via port (implemented in journey-service)
             List<EngineSearchResult> results = knowledgeBasePort.search(
                     accountId, indexName, queryVector, limit);
 
@@ -77,131 +71,78 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
 
             if (results.isEmpty()) {
                 log.warn("⚠️ Database query returned 0 rows for index: '{}'", indexName);
-                return triggerFallback(step,context,fallbackMsg);
+                return triggerFallback(step, context, fallbackMsg, resolvedMessage);
             }
 
-            EngineSearchResult bestMatch = results.get(0);
-            log.info("🎯 Evaluated top match score: {} | Text: '{}'", bestMatch.similarity(), bestMatch.answer());
+            EngineSearchResult bestMatch   = results.get(0);
+            double             bestScore   = bestMatch.similarity();
+            double             secondScore = results.size() > 1 ? results.get(1).similarity() : 0.0;
+            double             actualGap   = bestScore - secondScore;
 
-            double bestScore = bestMatch.similarity();
-            double secondScore = results.size() > 1 ? results.get(1).similarity() : 0.0;
-            double actualGap = bestScore - secondScore;
+            log.info("🎯 Top score={}, Second score={}, Gap={}", bestScore, secondScore, actualGap);
 
-            log.info(
-                    "Top score={}, Second score={}, Gap={}",
-                    bestScore,
-                    secondScore,
-                    actualGap
-            );
-
-            log.info("📊 Confidence gap check -> Best: {}, Second: {}, Computed Gap: {}", bestScore, secondScore, actualGap);
-            // GUARD 1: Absolute Floor (Protects against total hallucinations)
-            if(bestScore < MIN_ABSOLUTE_THRESHOLD) {
-                log.warn("❌ Top score {} rejected below absolute requirement of {}", bestMatch.similarity(), MIN_ABSOLUTE_THRESHOLD);
-                return triggerFallback(step,context,fallbackMsg);
+            // GUARD 1: Absolute Floor
+            if (bestScore < absoluteThreshold) {
+                log.warn("❌ Top score {} rejected below absolute threshold of {}", bestScore, absoluteThreshold);
+                return triggerFallback(step, context, fallbackMsg, resolvedMessage);
             }
 
-            // GUARD 2: The "Sure Match" Bypass (For exact Arabic-to-Arabic matches)
-            if(bestScore >= SURE_MATCH_THRESHOLD){
+            // GUARD 2: Sure Match Bypass
+            if (bestScore >= SURE_MATCH_THRESHOLD) {
                 log.info("🌟 Sure Match bypassed gap check! Score: {}", bestScore);
-                String cleanAnswerText = bestMatch.answer();
-                context.setVariable(engineUtils.sanitizeKey(step.getStepName()+"_result"), cleanAnswerText);
-                return StepResult.success(cleanAnswerText,step.getMessage());
+                String answer = bestMatch.answer();
+                setContextVariables(step, context, answer, true);
+                return StepResult.success(answer, resolvedMessage);
             }
 
-//            // Guard 2
-//            if (bestScore < SURE_MATCH_THRESHOLD && actualGap < MIN_RELATIVE_GAP) {
-//                log.warn("⚠️ Ambiguous result cluster detected. Actual gap of {} is less than required {}. Forcing fallback to protect domain accuracy.", actualGap, MIN_RELATIVE_GAP);
-//                return triggerFallback(step,context,fallbackMsg);
-//            }
-
-           // GUARD 3: The "Soft Match" / Cross-Lingual Zone
-            if(actualGap < MIN_RELATIVE_GAP) {
+            // GUARD 3: Soft Match / Cross-Lingual Zone
+            if (actualGap < MIN_RELATIVE_GAP) {
                 log.warn("⚠️ Ambiguous cluster detected (Gap {} < {}). Resolving via Context Aggregation.", actualGap, MIN_RELATIVE_GAP);
-                // Because the top scores are strong (>0.78) but the gap is small,
-                // the user's intent matches multiple FAQs.
-                // We combine the top 2 or 3 results into a single context block.
-
                 StringBuilder aggregatedResult = new StringBuilder();
-
-                for(int i=0 ;i<Math.min(results.size(),3);i++){
+                for (int i = 0; i < Math.min(results.size(), 3); i++) {
                     EngineSearchResult current = results.get(i);
-                    // Only include chunks that are mathematically close to the top score
-                    if((bestScore -current.similarity()) <= MIN_RELATIVE_GAP) {
+                    if ((bestScore - current.similarity()) <= MIN_RELATIVE_GAP) {
                         aggregatedResult.append(current.answer());
                     }
                 }
-                // Pass this aggregated block to your Chatbot LLM node
-              return handleSoftMatch(step,context,aggregatedResult.toString());
+                return handleSoftMatch(step, context, aggregatedResult.toString(), resolvedMessage);
             }
-            // if between 0.78 and 0.85 return best answer
-            String cleanAnswerText = bestMatch.answer();
-            // Store direct exact answer in context
-            context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), cleanAnswerText);
-            context.setVariable("retrieved_knowledge", cleanAnswerText);
 
+            // Direct answer (0.78 – 0.85 with sufficient gap)
+            String answer = bestMatch.answer();
+            setContextVariables(step, context, answer, true);
             log.info("✅ Knowledge Retrieval complete (Direct Answer).");
-            return  StepResult.success(cleanAnswerText, step.getMessage());
+            return StepResult.success(answer, resolvedMessage);
 
         } catch (Exception e) {
             log.error("❌ Knowledge Retrieval failed", e);
-            return StepResult.error("Knowledge Retrieval failed: " + e.getMessage());
+            return StepResult.error("KNOWLEDGE_RETRIEVAL: " + e.getMessage());
         }
     }
 
-    private StepResult triggerFallback(JourneyStep step, ExecutionContext context, String fallbackMsg) {
-        context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), fallbackMsg);
-        context.setVariable("retrieved_knowledge", fallbackMsg);
-        return StepResult.success(fallbackMsg,step.getMessage());
-    }
-
-    private StepResult handleSoftMatch(JourneyStep step, ExecutionContext context, String answer) {
-        context.setVariable(engineUtils.sanitizeKey(step.getStepName() + "_result"), answer);
+    private void setContextVariables(JourneyStep step, ExecutionContext context, String answer, boolean found) {
+        context.addStepResult(step.getStepOrder(), answer);
+        context.setVariable("step" + step.getStepOrder(), answer);
+        context.setVariable("lastStep", answer);
         context.setVariable("retrieved_knowledge", answer);
-        return StepResult.success(answer,step.getMessage());
-    }
-
-    private ApiConfig loadApiConfig(String json) {
-        try {
-            if (json == null || json.isEmpty()) return new ApiConfig();
-            return objectMapper.readValue(json, ApiConfig.class);
-        } catch (Exception e) {
-            return new ApiConfig();
+        context.setVariable("knowledge_found", found);
+        context.setVariable("step" + step.getStepOrder() + "_found", found);
+        if (step.getStepName() != null && !step.getStepName().isEmpty()) {
+            String safeName = engineUtils.sanitizeKey(step.getStepName());
+            context.setVariable(safeName + "_result", answer);
+            context.setVariable(safeName + "_found", found);
         }
     }
 
-//    private String determineCategoryWithAi(String userQuery,
-//                                           List<String> categories,
-//                                           String accountId){
-//        try{
-//            String categoriesListString = String.join("\n-", categories);
-//            String systemPrompt = """
-//                أنت مصنف نصوص محترف وخبير في فرز الاستفسارات الإدارية.
-//                مهمتك هي قراءة استفسار المستخدم واختيار التصنيف الأكثر ملاءمة له من القائمة الديناميكية المتوفرة فقط.
-//
-//                القائمة المتاحة حالياً في النظام:
-//                - %s
-//
-//                شروط صارمة:
-//                1. اختر تصنيفاً واحداً وبنفس اللفظ الدقيق والمطابق تماماً للقائمة المذكورة أعلاه.
-//                2. إذا كان السؤال عاماً، ترحيبياً، أو خارج نطاق دلالات هذه التصنيفات تماماً، أجب بكلمة واحدة فقط: OTHER.
-//                3. ممنوع نهائياً كتابة أي مقدمات، تفسيرات، علامات ترقيم، أو جمل إضافية. أجب باسم التصنيف أو كلمة OTHER فقط.
-//                """.formatted(categoriesListString);
-//
-//            AiRequestConfig config = aiConfigProvider.getConfig(accountId);
-//
-//            AiChatRequest chatRequest = AiChatRequest.builder()
-//                    .messages(List.of(AiMessage.system(systemPrompt),AiMessage.user(userQuery)))
-//                    .config(config)
-//                    .build();
-//
-//            AiResponse response = aiService.chat(chatRequest);
-//            String result = response.getContent() != null ? response.getContent().trim() : "OTHER";
-//
-//            return categories.contains(result) ? result : null ;
-//        } catch (Exception e) {
-//            log.error("⚠️ Dynamic category classification lookup encountered an error: {}", e.getMessage());
-//            return null ;
-//        }
-//    }
+    private StepResult triggerFallback(JourneyStep step, ExecutionContext context, String fallbackMsg, String resolvedMessage) {
+        setContextVariables(step, context, fallbackMsg, false);
+        return StepResult.success(fallbackMsg, resolvedMessage);
+    }
+
+    private StepResult handleSoftMatch(JourneyStep step, ExecutionContext context, String answer, String resolvedMessage) {
+        setContextVariables(step, context, answer, true);
+        return StepResult.success(answer, resolvedMessage);
+    }
 }
+
+

@@ -4,11 +4,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
-import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.BufferingClientHttpRequestFactory;
@@ -49,8 +50,14 @@ public class ApiCallStepHandler implements StepHandler {
 	@Override
 	public StepResult execute(JourneyStep step, ExecutionContext context) {
 		try {
+			if (step.getActionTarget() == null || step.getActionTarget().isBlank()) {
+				return StepResult.error("API_CALL: endpoint URL is required");
+			}
+
 			String url = engineUtils.replacePlaceholders(step.getActionTarget(), context.getVariables());
-			ApiConfig config = loadApiConfig(step.getApiConfig());
+			ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
+
+			url = appendQueryParams(url, config.getQueryParams(), context.getVariables());
 
 			HttpHeaders headers = new HttpHeaders();
 			headers.setContentType(MediaType.APPLICATION_JSON);
@@ -90,11 +97,15 @@ public class ApiCallStepHandler implements StepHandler {
 			if (step.getStepName() != null && !step.getStepName().isEmpty()) {
 				context.setVariable(engineUtils.sanitizeKey(step.getStepName()), apiResult);
 			}
+			context.setVariable("lastStep", apiResult);
 			if (apiResult instanceof java.util.Map) {
 				context.getVariables().putAll((java.util.Map<String, Object>) apiResult);
 			}
 
-			return StepResult.success(apiResult, step.getMessage());
+			String resolvedMessage = step.getMessage() != null && !step.getMessage().isEmpty()
+					? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
+					: null;
+			return StepResult.success(apiResult, resolvedMessage);
 		} catch (HttpClientErrorException | HttpServerErrorException e) {
 			log.error("❌ API_CALL step '{}' status={} error={}", step.getStepName(), e.getStatusCode(),
 					e.getResponseBodyAsString());
@@ -105,6 +116,23 @@ public class ApiCallStepHandler implements StepHandler {
 			log.error("❌ API_CALL step '{}' unexpected error", step.getStepName(), e);
 			return StepResult.error("API Call Failed: " + e.getMessage());
 		}
+	}
+
+	private String appendQueryParams(String url, Map<String, String> queryParams, Map<String, Object> variables) {
+		if (queryParams == null || queryParams.isEmpty()) {
+			return url;
+		}
+		StringBuilder sb = new StringBuilder(url);
+		boolean hasQuery = url.contains("?");
+		for (Map.Entry<String, String> entry : queryParams.entrySet()) {
+			String key = URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8);
+			String value = URLEncoder.encode(
+					engineUtils.replacePlaceholders(entry.getValue(), variables),
+					StandardCharsets.UTF_8);
+			sb.append(hasQuery ? '&' : '?').append(key).append('=').append(value);
+			hasQuery = true;
+		}
+		return sb.toString();
 	}
 
 	private Object processBody(Object body, Map<String, Object> variables) {
@@ -128,13 +156,4 @@ public class ApiCallStepHandler implements StepHandler {
 		return body;
 	}
 
-	private ApiConfig loadApiConfig(String json) {
-		try {
-			if (json == null || json.isEmpty())
-				return new ApiConfig();
-			return objectMapper.readValue(json, ApiConfig.class);
-		} catch (Exception e) {
-			return new ApiConfig();
-		}
-	}
 }

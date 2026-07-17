@@ -1,5 +1,8 @@
 package com.itways.assistant.journey.engine.util;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.itways.assistant.journey.engine.model.ApiConfig;
+import lombok.RequiredArgsConstructor;
 import org.springframework.expression.ExpressionParser;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
@@ -10,10 +13,29 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Component
+@RequiredArgsConstructor
 public class EngineUtils {
 
+    private final ObjectMapper objectMapper;
     private final ExpressionParser parser = new SpelExpressionParser();
     private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\{\\{([a-zA-Z0-9_\\.]+)\\}\\}|\\{([a-zA-Z0-9_\\.]+)\\}|<%([a-zA-Z0-9_\\.]+)%>");
+    private static final Pattern SINGLE_PLACEHOLDER = Pattern.compile("^\\{\\{([a-zA-Z0-9_\\.]+)\\}\\}$");
+
+    /**
+     * Resolves a source template preserving the original type when it is a single
+     * placeholder (e.g. {@code {{lastStep}}} → Integer 10). Mixed templates still
+     * use string substitution via {@link #replacePlaceholders}.
+     */
+    public Object resolveSourceValue(String source, Map<String, Object> context) {
+        if (source == null || source.isEmpty()) {
+            return source;
+        }
+        Matcher single = SINGLE_PLACEHOLDER.matcher(source.trim());
+        if (single.matches()) {
+            return resolveValue(single.group(1), context);
+        }
+        return replacePlaceholders(source, context);
+    }
 
     public Object evaluateExpression(String expression, Map<String, Object> context) {
         if (expression == null || expression.isEmpty()) {
@@ -51,7 +73,7 @@ public class EngineUtils {
                        : matcher.group(2) != null ? matcher.group(2)
                        : matcher.group(3);
             Object val = resolveValue(key, context);
-            String strVal = (val != null) ? val.toString() : "null";
+            String strVal = (val != null) ? val.toString() : "";
             result = result.replace(fullMatch, strVal);
         }
         return result;
@@ -72,5 +94,14 @@ public class EngineUtils {
 
     public String sanitizeKey(String name) {
         return name == null ? "unknown" : name.replaceAll("[^a-zA-Z0-9]", "");
+    }
+
+    public ApiConfig parseApiConfig(String json) {
+        try {
+            if (json == null || json.isEmpty()) return new ApiConfig();
+            return objectMapper.readValue(json, ApiConfig.class);
+        } catch (Exception e) {
+            return new ApiConfig();
+        }
     }
 }

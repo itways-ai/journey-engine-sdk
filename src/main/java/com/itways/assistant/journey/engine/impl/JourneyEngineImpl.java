@@ -1,11 +1,13 @@
 package com.itways.assistant.journey.engine.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.itways.assistant.journey.engine.handler.TriggerJourneyStepHandler;
 import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.JourneyEngine;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.service.StepHandlerRegistry;
 import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.JourneyStepGraph;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -19,15 +21,25 @@ public class JourneyEngineImpl implements JourneyEngine {
 
     private final StepHandlerRegistry handlerRegistry;
     private final EngineUtils engineUtils;
+    private final ObjectMapper objectMapper;
 
     @Override
     public Map<String, Object> start(Journey journey, String accountId, Map<String, Object> initialParams) {
+        Map<String, Object> variables = new HashMap<>(initialParams != null ? initialParams : Map.of());
+        // Seed call stack so TRIGGER_JOURNEY can detect cycles without needing the parent Journey object
+        if (!variables.containsKey(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK)
+                && journey.getTriggerIntent() != null
+                && !journey.getTriggerIntent().isBlank()) {
+            variables.put(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK,
+                    new ArrayList<>(List.of(journey.getTriggerIntent())));
+        }
+
         ExecutionContext context = ExecutionContext.builder()
                 .journeyId(journey.getId())
                 .accountId(accountId)
                 .currentStepIndex(-1)
                 .status(ExecutionStatus.RUNNING)
-                .variables(new HashMap<>(initialParams))
+                .variables(variables)
                 .startedAt(new Date())
                 .build();
 
@@ -36,14 +48,18 @@ public class JourneyEngineImpl implements JourneyEngine {
 
     @Override
     public Map<String, Object> resume(Journey journey, ExecutionContext context, Map<String, Object> inputParams) {
-        context.getVariables().putAll(inputParams);
+        Map<String, Object> pending = inputParams != null ? new HashMap<>(inputParams) : new HashMap<>();
+        context.getVariables().putAll(pending);
+        context.setVariable(TriggerJourneyStepHandler.PENDING_RESUME_INPUT, pending);
         context.setStatus(ExecutionStatus.RUNNING);
-        return execute(journey, context);
+        Map<String, Object> result = execute(journey, context);
+        context.getVariables().remove(TriggerJourneyStepHandler.PENDING_RESUME_INPUT);
+        return result;
     }
 
     private Map<String, Object> execute(Journey journey, ExecutionContext context) {
 
-        System.out.println("START JOURNEY EXECUTION>>");
+        log.debug("START JOURNEY EXECUTION >> journeyId={} accountId={}", journey.getId(), context.getAccountId());
         Map<String, Object> result = new HashMap<>();
         List<Map<String, Object>> stepResults = new ArrayList<>();
 
@@ -56,7 +72,19 @@ public class JourneyEngineImpl implements JourneyEngine {
             return result;
         }
 
-        List<JourneyStep> sortedSteps = sortSteps(steps);
+        List<JourneyStep> sortedSteps;
+        try {
+            sortedSteps = JourneyStepGraph.sortSteps(steps);
+        } catch (IllegalStateException e) {
+            log.error("❌ Journey '{}' has a cyclic step graph — aborting execution: {}",
+                    journey.getTriggerIntent(), e.getMessage());
+            context.setStatus(ExecutionStatus.ERROR);
+            result.put("status", "ERROR");
+            result.put("message", e.getMessage());
+            result.put("context", context);
+            result.put("stepResults", stepResults);
+            return result;
+        }
 
         int i = 0;
         while (i < sortedSteps.size() && context.getStatus() == ExecutionStatus.RUNNING) {
@@ -70,8 +98,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                 continue;
             }
 
-            // check branch eligibility
-            if (!isEligible(step, context)) {
+            if (!isEligible(step, context, sortedSteps)) {
                 i++;
                 continue;
             }
@@ -100,6 +127,11 @@ public class JourneyEngineImpl implements JourneyEngine {
             }
             long stepEnd = System.currentTimeMillis();
 
+            Map<String, Object> metadata = stepResult.getMetadata();
+            appendNestedStepResults(stepResults, metadata);
+            boolean skipSelfView = metadata != null
+                    && Boolean.TRUE.equals(metadata.get(TriggerJourneyStepHandler.META_SKIP_SELF_VIEW));
+
             Map<String, Object> viewResult = new HashMap<>();
             viewResult.put("type", step.getActionType());
             viewResult.put("id", step.getId());
@@ -115,9 +147,11 @@ public class JourneyEngineImpl implements JourneyEngine {
                 if (stepResult.getData() != null) {
                     viewResult.put("data", stepResult.getData());
                     try {
-                        viewResult.put("outputPayload", new ObjectMapper().writeValueAsString(stepResult.getData()));
-                    } catch(Exception ignored){}
+                        viewResult.put("outputPayload", objectMapper.writeValueAsString(stepResult.getData()));
+                    } catch (Exception ignored) {
+                    }
                 }
+                mergeStepMetadata(viewResult, metadata);
                 stepResults.add(viewResult);
                 context.setCurrentStepIndex(stepOrder);
                 context.addStepResult(stepOrder, stepResult.getData());
@@ -125,28 +159,33 @@ public class JourneyEngineImpl implements JourneyEngine {
                 String safeName = engineUtils
                         .sanitizeKey(step.getStepName() != null ? step.getStepName() : ("step" + stepOrder));
                 context.setVariable(safeName, stepResult.getData());
-                
+
                 i++;
             } else if ("WAITING".equals(stepResult.getStatus())) {
-                viewResult.put("message", stepResult.getMessage());
-                viewResult.putAll(stepResult.getMetadata());
-                stepResults.add(viewResult);
+                if (!skipSelfView) {
+                    viewResult.put("message", stepResult.getMessage());
+                    mergeStepMetadata(viewResult, metadata);
+                    stepResults.add(viewResult);
+                }
                 // Pause execution
                 result.put("status", "WAITING");
                 result.put("stepResults", stepResults);
                 result.put("context", context);
+                if (stepResult.getMessage() != null) {
+                    result.put("message", stepResult.getMessage());
+                }
                 return result;
             } else if ("JUMP".equals(stepResult.getStatus())) {
                 int targetOrder = (Integer) stepResult.getMetadata().get("targetOrder");
-                
+
                 // Clear `stepResults` sequencing >= targetOrder
                 List<Integer> ordersToRemove = new java.util.ArrayList<>(context.getStepResults().keySet());
                 for (Integer order : ordersToRemove) {
                     if (order >= targetOrder) {
-                         context.getStepResults().remove(order);
+                        context.getStepResults().remove(order);
                     }
                 }
-                
+
                 // Keep variables alive if they were also created by a step < targetOrder
                 java.util.Set<String> safeNamesToKeep = steps.stream()
                         .filter(s -> s.getStepOrder() < targetOrder)
@@ -155,19 +194,20 @@ public class JourneyEngineImpl implements JourneyEngine {
 
                 for (JourneyStep s : steps) {
                     if (s.getStepOrder() >= targetOrder) {
-                         String name = engineUtils.sanitizeKey(s.getStepName() != null ? s.getStepName() : ("step" + s.getStepOrder()));
-                         if (!safeNamesToKeep.contains(name)) {
-                              context.getVariables().remove(name);
-                         }
+                        String name = engineUtils.sanitizeKey(s.getStepName() != null ? s.getStepName() : ("step" + s.getStepOrder()));
+                        if (!safeNamesToKeep.contains(name)) {
+                            context.getVariables().remove(name);
+                        }
                     }
                 }
                 context.getVariables().keySet().removeIf(k -> k.startsWith("step") && ordersToRemove.stream().anyMatch(o -> o >= targetOrder && k.equals("step" + o)));
-                
+
                 context.setCurrentStepIndex(targetOrder - 1);
                 i = 0; // Reset loop to run from start
                 continue;
             } else {
                 viewResult.put("message", stepResult.getMessage());
+                mergeStepMetadata(viewResult, metadata);
                 stepResults.add(viewResult);
                 if (step.isContinueOnError()) {
                     context.addStepResult(stepOrder, "FAILED");
@@ -209,79 +249,28 @@ public class JourneyEngineImpl implements JourneyEngine {
         return result;
     }
 
-    private List<Integer> resolveInboundParents(JourneyStep step) {
-        if (step.getParentOrders() != null && !step.getParentOrders().isEmpty()) {
-            return step.getParentOrders();
+    @SuppressWarnings("unchecked")
+    private void appendNestedStepResults(List<Map<String, Object>> stepResults, Map<String, Object> metadata) {
+        if (metadata == null) {
+            return;
         }
-        if (step.getParentOrder() != null && step.getParentOrder() > 0) {
-            return List.of(step.getParentOrder());
-        }
-        return Collections.emptyList();
-    }
-
-    private boolean isRejoinStep(JourneyStep step) {
-        return step.getParentOrders() != null && !step.getParentOrders().isEmpty();
-    }
-
-    private List<JourneyStep> sortSteps(List<JourneyStep> steps) {
-        Map<Integer, JourneyStep> stepMap = new HashMap<>();
-        Map<Integer, List<Integer>> adj = new HashMap<>();
-        Map<Integer, Integer> inDegree = new HashMap<>();
-
-        for (JourneyStep s : steps) {
-            stepMap.put(s.getStepOrder(), s);
-            inDegree.put(s.getStepOrder(), 0);
-        }
-
-        for (JourneyStep s : steps) {
-            for (Integer parent : resolveInboundParents(s)) {
-                if (parent == null || parent <= 0 || !stepMap.containsKey(parent)) {
-                    continue;
-                }
-                adj.computeIfAbsent(parent, k -> new ArrayList<>()).add(s.getStepOrder());
-                inDegree.merge(s.getStepOrder(), 1, Integer::sum);
-            }
-        }
-
-        Queue<Integer> queue = new LinkedList<>();
-        for (JourneyStep s : steps) {
-            if (inDegree.getOrDefault(s.getStepOrder(), 0) == 0) {
-                queue.add(s.getStepOrder());
-            }
-        }
-
-        List<Integer> sortedOrders = new ArrayList<>();
-        while (!queue.isEmpty()) {
-            int node = queue.poll();
-            sortedOrders.add(node);
-            for (int child : adj.getOrDefault(node, Collections.emptyList())) {
-                int deg = inDegree.merge(child, -1, Integer::sum);
-                if (deg == 0) {
-                    queue.add(child);
+        Object nested = metadata.get(TriggerJourneyStepHandler.META_NESTED_STEP_RESULTS);
+        if (nested instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> map) {
+                    stepResults.add((Map<String, Object>) map);
                 }
             }
         }
-
-        for (JourneyStep s : steps) {
-            if (!sortedOrders.contains(s.getStepOrder())) {
-                sortedOrders.add(s.getStepOrder());
-            }
-        }
-
-        List<JourneyStep> result = new ArrayList<>();
-        for (int order : sortedOrders) {
-            result.add(stepMap.get(order));
-        }
-        return result;
     }
 
-    private boolean isEligible(JourneyStep step, ExecutionContext context) {
-        List<Integer> inbound = resolveInboundParents(step);
+    private boolean isEligible(JourneyStep step, ExecutionContext context, List<JourneyStep> allSteps) {
+        List<Integer> inbound = JourneyStepGraph.resolveInboundParents(step);
         if (inbound.isEmpty()) {
             return true;
         }
 
-        if (isRejoinStep(step)) {
+        if (JourneyStepGraph.isRejoinStep(step)) {
             for (Integer parent : inbound) {
                 if (context.getStepResults().get(parent) != null) {
                     return true;
@@ -303,13 +292,85 @@ public class JourneyEngineImpl implements JourneyEngine {
             return true;
         }
 
+        // CONDITION: boolean true/false routing (raw Boolean or Map.result)
         if (parentResult instanceof Boolean) {
             boolean boolResult = (Boolean) parentResult;
             return (requiredBranch.equalsIgnoreCase("true") && boolResult)
                     || (requiredBranch.equalsIgnoreCase("false") && !boolResult);
-        } else {
-            String parentValStr = String.valueOf(parentResult);
-            return requiredBranch.equalsIgnoreCase(parentValStr) || "DEFAULT".equalsIgnoreCase(requiredBranch);
+        }
+        if (parentResult instanceof Map<?, ?> parentMap) {
+            Object resultKey = parentMap.get("result");
+            if (resultKey instanceof Boolean boolResult) {
+                return (requiredBranch.equalsIgnoreCase("true") && boolResult)
+                        || (requiredBranch.equalsIgnoreCase("false") && !boolResult);
+            }
+        }
+
+        // SWITCH (and other value-based parents): named case or DEFAULT fallback
+        String parentValStr = resolveSwitchValue(parentResult);
+        if ("DEFAULT".equalsIgnoreCase(requiredBranch)) {
+            return !hasMatchingNamedCase(parentOrder, parentValStr, allSteps);
+        }
+        return parentValStr != null && requiredBranch.equalsIgnoreCase(parentValStr);
+    }
+
+    /**
+     * Extracts the switch/case value from a parent step result.
+     * SWITCH stores {@code { "value": ... }}; scalars are stringified as-is.
+     */
+    private String resolveSwitchValue(Object parentResult) {
+        if (parentResult instanceof Map<?, ?> parentMap && parentMap.containsKey("value")) {
+            Object valueKey = parentMap.get("value");
+            return valueKey != null ? String.valueOf(valueKey) : null;
+        }
+        return parentResult != null ? String.valueOf(parentResult) : null;
+    }
+
+    /**
+     * Returns true when a sibling under {@code parentOrder} has a non-DEFAULT
+     * branchName that matches {@code switchValue} (case-insensitive).
+     */
+    private boolean hasMatchingNamedCase(Integer parentOrder, String switchValue, List<JourneyStep> allSteps) {
+        if (switchValue == null || allSteps == null) {
+            return false;
+        }
+        for (JourneyStep sibling : allSteps) {
+            if (JourneyStepGraph.isRejoinStep(sibling)) {
+                continue;
+            }
+            List<Integer> siblingParents = JourneyStepGraph.resolveInboundParents(sibling);
+            if (siblingParents.isEmpty() || !parentOrder.equals(siblingParents.get(0))) {
+                continue;
+            }
+            String caseName = sibling.getBranchName();
+            if (caseName == null || "DEFAULT".equalsIgnoreCase(caseName)) {
+                continue;
+            }
+            if (caseName.equalsIgnoreCase(switchValue)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Merges handler metadata into the client-facing step view without overwriting
+     * core fields already set on {@code viewResult} (e.g. action {@code type}).
+     * Engine-reserved nested-journey keys are excluded.
+     */
+    private void mergeStepMetadata(Map<String, Object> viewResult, Map<String, Object> metadata) {
+        if (metadata == null || metadata.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<String, Object> entry : metadata.entrySet()) {
+            String key = entry.getKey();
+            if (TriggerJourneyStepHandler.META_NESTED_STEP_RESULTS.equals(key)
+                    || TriggerJourneyStepHandler.META_SKIP_SELF_VIEW.equals(key)) {
+                continue;
+            }
+            if (!viewResult.containsKey(key)) {
+                viewResult.put(key, entry.getValue());
+            }
         }
     }
 

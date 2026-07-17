@@ -1,5 +1,8 @@
 package com.itways.assistant.journey.engine.model;
 
+// DUPLICATE: com.itways.assistant.journey.domain.dto.JourneyStep in journey-service
+// mirrors this class. Keep both in sync, or replace with a shared journey-model module.
+
 import java.util.List;
 
 import lombok.AllArgsConstructor;

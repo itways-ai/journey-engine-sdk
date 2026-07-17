@@ -60,9 +60,8 @@
   "LOOP_JUMP": {
     "targetStepName": "START_VALIDATION"
   },
-  "TRIGGER_INTENT": {
-    "targetIntent": "CUSTOMER_SUPPORT_ESC",
-    "payload": { "reason": "High urgency detected" }
+  "TRIGGER_JOURNEY": {
+    "targetIntent": "CUSTOMER_SUPPORT_ESC"
   },
   "REDIRECT": {
     "url": "https://nexus.ai/dashboard/{{project_id}}",
