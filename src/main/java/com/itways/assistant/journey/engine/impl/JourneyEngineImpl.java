@@ -5,11 +5,11 @@ import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.handler.TriggerJourneyStepHandler;
 import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.JourneyEngine;
+import com.itways.assistant.journey.engine.service.JourneyRunLifecyclePort;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.service.StepHandlerRegistry;
 import com.itways.assistant.journey.engine.util.EngineUtils;
 import com.itways.assistant.journey.engine.util.JourneyStepGraph;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -17,17 +17,39 @@ import java.util.*;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class JourneyEngineImpl implements JourneyEngine {
 
     private final StepHandlerRegistry handlerRegistry;
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final ObjectMapper objectMapper;
+    private final List<JourneyRunLifecyclePort> lifecyclePorts;
+
+    public JourneyEngineImpl(StepHandlerRegistry handlerRegistry, EngineUtils engineUtils,
+                             VariableContext variableContext, ObjectMapper objectMapper,
+                             List<JourneyRunLifecyclePort> lifecyclePorts) {
+        this.handlerRegistry = handlerRegistry;
+        this.engineUtils = engineUtils;
+        this.variableContext = variableContext;
+        this.objectMapper = objectMapper;
+        this.lifecyclePorts = lifecyclePorts != null ? lifecyclePorts : List.of();
+    }
 
     @Override
     public Map<String, Object> start(Journey journey, String accountId, Map<String, Object> initialParams) {
+        Map<String, Object> params = initialParams != null ? new HashMap<>(initialParams) : new HashMap<>();
+
+        String executionId = UUID.randomUUID().toString();
+        String parentExecutionId = stringOrNull(params.remove(TriggerJourneyStepHandler.PARENT_EXECUTION_ID));
+        String rootExecutionId = stringOrNull(params.remove(TriggerJourneyStepHandler.ROOT_EXECUTION_ID));
+        if (rootExecutionId == null || rootExecutionId.isBlank()) {
+            rootExecutionId = executionId;
+        }
+
         ExecutionContext context = ExecutionContext.builder()
+                .executionId(executionId)
+                .parentExecutionId(parentExecutionId)
+                .rootExecutionId(rootExecutionId)
                 .journeyId(journey.getId())
                 .accountId(accountId)
                 .currentStepIndex(-1)
@@ -36,7 +58,6 @@ public class JourneyEngineImpl implements JourneyEngine {
                 .startedAt(new Date())
                 .build();
 
-        Map<String, Object> params = initialParams != null ? initialParams : Map.of();
         if (isStructuredVariableMap(params)) {
             context.setVariables(shallowCopyVariables(params));
             variableContext.ensureStructure(context);
@@ -52,7 +73,10 @@ public class JourneyEngineImpl implements JourneyEngine {
                     new ArrayList<>(List.of(journey.getTriggerIntent())));
         }
 
-        return execute(journey, context);
+        // Durable RUNNING row before any business step; failure aborts the run.
+        emitLifecycle(buildLifecycleEvent(journey, context, JourneyRunLifecycleEvent.STATUS_RUNNING, null, null));
+
+        return finalizeResult(journey, context, execute(journey, context));
     }
 
     private boolean isStructuredVariableMap(Map<String, Object> params) {
@@ -61,18 +85,29 @@ public class JourneyEngineImpl implements JourneyEngine {
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> shallowCopyVariables(Map<String, Object> source) {
-        Map<String, Object> copy = new HashMap<>();
-        for (Map.Entry<String, Object> e : source.entrySet()) {
-            Object val = e.getValue();
-            if (val instanceof Map<?, ?> m) {
-                copy.put(e.getKey(), new HashMap<>((Map<String, Object>) m));
-            } else if (val instanceof List<?> list) {
-                copy.put(e.getKey(), new ArrayList<>(list));
-            } else {
-                copy.put(e.getKey(), val);
+        return (Map<String, Object>) deepCopyValue(source);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object deepCopyValue(Object val) {
+        if (val instanceof Map<?, ?> m) {
+            Map<String, Object> copy = new HashMap<>();
+            for (Map.Entry<?, ?> e : m.entrySet()) {
+                if (e.getKey() == null) {
+                    continue;
+                }
+                copy.put(String.valueOf(e.getKey()), deepCopyValue(e.getValue()));
             }
+            return copy;
         }
-        return copy;
+        if (val instanceof List<?> list) {
+            List<Object> copy = new ArrayList<>(list.size());
+            for (Object item : list) {
+                copy.add(deepCopyValue(item));
+            }
+            return copy;
+        }
+        return val;
     }
 
     @Override
@@ -81,14 +116,19 @@ public class JourneyEngineImpl implements JourneyEngine {
         variableContext.mergeInputs(context, pending);
         context.setVariable(TriggerJourneyStepHandler.PENDING_RESUME_INPUT, pending);
         context.setStatus(ExecutionStatus.RUNNING);
+        // Ensure lineage fields are present after deserialization.
+        if (context.getRootExecutionId() == null || context.getRootExecutionId().isBlank()) {
+            context.setRootExecutionId(context.getExecutionId());
+        }
         Map<String, Object> result = execute(journey, context);
         context.getVariables().remove(TriggerJourneyStepHandler.PENDING_RESUME_INPUT);
-        return result;
+        return finalizeResult(journey, context, result);
     }
 
     private Map<String, Object> execute(Journey journey, ExecutionContext context) {
 
-        log.debug("START JOURNEY EXECUTION >> journeyId={} accountId={}", journey.getId(), context.getAccountId());
+        log.debug("START JOURNEY EXECUTION >> journeyId={} accountId={} executionId={}",
+                journey.getId(), context.getAccountId(), context.getExecutionId());
         Map<String, Object> result = new HashMap<>();
         List<Map<String, Object>> stepResults = new ArrayList<>();
 
@@ -98,6 +138,7 @@ public class JourneyEngineImpl implements JourneyEngine {
             result.put("status", "FINISHED");
             result.put("message", "This journey has no steps configured.");
             result.put("context", context);
+            result.put("stepResults", stepResults);
             return result;
         }
 
@@ -105,7 +146,7 @@ public class JourneyEngineImpl implements JourneyEngine {
         try {
             sortedSteps = JourneyStepGraph.sortSteps(steps);
         } catch (IllegalStateException e) {
-            log.error("Journey '{}' has a cyclic step graph — aborting execution: {}",
+            log.error("Journey '{}' has a cyclic step graph - aborting execution: {}",
                     journey.getTriggerIntent(), e.getMessage());
             context.setStatus(ExecutionStatus.ERROR);
             result.put("status", "ERROR");
@@ -260,6 +301,101 @@ public class JourneyEngineImpl implements JourneyEngine {
         }
 
         return result;
+    }
+
+    private Map<String, Object> finalizeResult(Journey journey, ExecutionContext context, Map<String, Object> result) {
+        putIdentity(result, context);
+        String status = (String) result.get("status");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> stepLogs = result.get("stepResults") instanceof List<?> list
+                ? (List<Map<String, Object>>) list
+                : List.of();
+        String message = result.get("message") != null ? String.valueOf(result.get("message")) : null;
+
+        if ("WAITING".equals(status)) {
+            emitLifecycleSoft(buildLifecycleEvent(journey, context, JourneyRunLifecycleEvent.STATUS_WAITING,
+                    stepLogs, message));
+        } else if ("ERROR".equals(status)) {
+            emitLifecycleSoft(buildLifecycleEvent(journey, context, JourneyRunLifecycleEvent.STATUS_ERROR,
+                    stepLogs, message));
+        } else if ("FINISHED".equals(status) || "COMPLETED".equals(status)) {
+            emitLifecycleSoft(buildLifecycleEvent(journey, context, JourneyRunLifecycleEvent.STATUS_COMPLETED,
+                    stepLogs, message));
+        }
+        return result;
+    }
+
+    private void putIdentity(Map<String, Object> result, ExecutionContext context) {
+        result.put("executionId", context.getExecutionId());
+        result.put("parentExecutionId", context.getParentExecutionId());
+        result.put("rootExecutionId", context.getRootExecutionId());
+    }
+
+    private JourneyRunLifecycleEvent buildLifecycleEvent(Journey journey, ExecutionContext context,
+                                                         String status, List<Map<String, Object>> stepLogs,
+                                                         String message) {
+        Date completedAt = null;
+        Long durationMs = null;
+        if (!JourneyRunLifecycleEvent.STATUS_RUNNING.equals(status)) {
+            completedAt = new Date();
+            if (context.getStartedAt() != null) {
+                durationMs = completedAt.getTime() - context.getStartedAt().getTime();
+            }
+        }
+
+        Map<String, Object> stepResultsMap = new HashMap<>();
+        if (context.getStepResults() != null) {
+            for (Map.Entry<Integer, Object> e : context.getStepResults().entrySet()) {
+                stepResultsMap.put(String.valueOf(e.getKey()), e.getValue());
+            }
+        }
+
+        String userId = context.getVariable("userId") != null
+                ? String.valueOf(context.getVariable("userId"))
+                : null;
+
+        return JourneyRunLifecycleEvent.builder()
+                .executionId(context.getExecutionId())
+                .parentExecutionId(context.getParentExecutionId())
+                .rootExecutionId(context.getRootExecutionId())
+                .journeyId(context.getJourneyId() != null ? context.getJourneyId() : journey.getId())
+                .accountId(context.getAccountId())
+                .triggerIntent(journey.getTriggerIntent())
+                .status(status)
+                .startedAt(context.getStartedAt())
+                .completedAt(completedAt)
+                .durationMs(durationMs)
+                .userId(userId)
+                .message(message)
+                .stepLogs(stepLogs != null ? stepLogs : List.of())
+                .variables(context.getVariables() != null ? new HashMap<>(context.getVariables()) : Map.of())
+                .stepResults(stepResultsMap)
+                .build();
+    }
+
+    private void emitLifecycle(JourneyRunLifecycleEvent event) {
+        for (JourneyRunLifecyclePort port : lifecyclePorts) {
+            port.onLifecycleEvent(event);
+        }
+    }
+
+    private void emitLifecycleSoft(JourneyRunLifecycleEvent event) {
+        for (JourneyRunLifecyclePort port : lifecyclePorts) {
+            try {
+                port.onLifecycleEvent(event);
+            } catch (Exception e) {
+                log.error("Lifecycle update failed for executionId={} status={}",
+                        event.getExecutionId(), event.getStatus(), e);
+            }
+        }
+    }
+
+    private static String stringOrNull(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        String s = String.valueOf(raw);
+        return s.isBlank() ? null : s;
     }
 
     @SuppressWarnings("unchecked")

@@ -14,7 +14,12 @@ import java.util.Map;
 @NoArgsConstructor
 @AllArgsConstructor
 public class ExecutionContext {
+    /** Permanent UUID for this run (also used as WAITING resume key). */
     private String executionId;
+    /** Immediate parent run UUID when this run was started via TRIGGER_JOURNEY. */
+    private String parentExecutionId;
+    /** Top-level run UUID for the nesting tree (equals executionId for top-level runs). */
+    private String rootExecutionId;
     private Long journeyId;
     private String accountId;
     private int currentStepIndex;

@@ -1,14 +1,16 @@
 package com.itways.assistant.journey.engine.handler;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
-import javax.script.Bindings;
-import javax.script.ScriptEngine;
-import javax.script.ScriptEngineManager;
-
+import org.graalvm.polyglot.Context;
+import org.graalvm.polyglot.HostAccess;
+import org.graalvm.polyglot.Value;
 import org.springframework.stereotype.Component;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
@@ -31,6 +33,7 @@ public class CodeScriptStepHandler implements StepHandler {
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
+    private final ObjectMapper objectMapper;
 
     @Override
     public String getType() {
@@ -52,34 +55,81 @@ public class CodeScriptStepHandler implements StepHandler {
         try {
             ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
             String code = config.getCode();
-            if (code == null || code.isEmpty()) {
-                return StepResult.error("Script code is missing");
+            if (code == null || code.isBlank()) {
+                return StepResult.error("CODE_SCRIPT: script code is required");
             }
 
+            // JSON round-trip so scripts see plain JS objects (steps['3'].output.status)
+            // instead of Java Maps that do not support JS property access.
             Map<String, Object> variables = new HashMap<>(context.getVariables());
-            Object resultValue = null;
+            String ctxJson = objectMapper.writeValueAsString(variables);
 
-            try {
-                ScriptEngineManager manager = new ScriptEngineManager();
-                ScriptEngine engine = manager.getEngineByName("js");
-                if (engine != null) {
-                    Bindings bindings = engine.createBindings();
-                    bindings.putAll(variables);
-                    resultValue = engine.eval(code, bindings);
-                } else {
-                    resultValue = engineUtils.replacePlaceholders(code, context.getVariables());
-                }
-            } catch (Exception e) {
-                log.warn("Execution error in script: {}", e.getMessage());
-                resultValue = "TRANSFORMATION_ERROR";
+            Object resultValue;
+            try (Context js = Context.newBuilder("js")
+                    .allowHostAccess(HostAccess.ALL)
+                    .option("engine.WarnInterpreterOnly", "false")
+                    .allowExperimentalOptions(true)
+                    .build()) {
+                js.getBindings("js").putMember("__ctxJson", ctxJson);
+                // Seed VariableContext roots as plain JS locals shared across evals.
+                js.eval("js", """
+                        var __ctx = JSON.parse(__ctxJson);
+                        var inputs = __ctx.inputs;
+                        var steps = __ctx.steps;
+                        var state = __ctx.state;
+                        var channel = __ctx.channel;
+                        var runtime = __ctx.runtime;
+                        """);
+                // Top-level script completion value (last expression) is returned —
+                // same semantics journey authors expect from ScriptEngine.eval.
+                Value result = js.eval("js", code);
+                resultValue = valueToJava(result);
             }
 
             variableContext.storeOutput(context, step, resultValue);
             return StepResult.success(resultValue, step.getMessage());
         } catch (Exception e) {
-            log.error("Code Script failed", e);
-            return StepResult.error("Script Execution Failure: " + e.getMessage());
+            String detail = e.getMessage() != null ? e.getMessage() : e.toString();
+            log.error("CODE_SCRIPT execution failed for step '{}': {}", step.getStepName(), detail, e);
+            return StepResult.error("CODE_SCRIPT execution failed: " + detail);
         }
+    }
+
+    private static Object valueToJava(Value value) {
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (value.isBoolean()) {
+            return value.asBoolean();
+        }
+        if (value.isNumber()) {
+            if (value.fitsInInt()) {
+                return value.asInt();
+            }
+            if (value.fitsInLong()) {
+                return value.asLong();
+            }
+            return value.asDouble();
+        }
+        if (value.isString()) {
+            return value.asString();
+        }
+        if (value.hasArrayElements()) {
+            int size = (int) value.getArraySize();
+            List<Object> list = new ArrayList<>(size);
+            for (int i = 0; i < size; i++) {
+                list.add(valueToJava(value.getArrayElement(i)));
+            }
+            return list;
+        }
+        if (value.hasMembers()) {
+            Map<String, Object> map = new HashMap<>();
+            for (String key : value.getMemberKeys()) {
+                map.put(key, valueToJava(value.getMember(key)));
+            }
+            return map;
+        }
+        return value.toString();
     }
 
 }
