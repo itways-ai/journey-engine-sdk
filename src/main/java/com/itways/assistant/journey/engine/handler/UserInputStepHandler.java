@@ -23,6 +23,9 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class UserInputStepHandler implements StepHandler {
 
+    /** Engine-internal marker: this step has asked for confirmation and is awaiting it. */
+    static final String AWAITING_CONFIRM_PREFIX = "userInputAwaitingConfirm_";
+
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
@@ -52,20 +55,27 @@ public class UserInputStepHandler implements StepHandler {
             variableContext.storeOutput(context, step, answer);
             inputs.remove("answer");
 
-            if ("INTERACTIVE".equalsIgnoreCase(uiConfig.getInputMode()) && answer instanceof String) {
-                String confirmKey = "runtime.userInput_" + step.getStepOrder() + "_confirmed";
-                @SuppressWarnings("unchecked")
-                Map<String, Object> runtime = (Map<String, Object>) context.getVariables().get("runtime");
-                if (!Boolean.TRUE.equals(runtime.get(confirmKey))) {
-                    context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);
-                    Map<String, Object> metadata = prepareMetadata(step, uiConfig);
-                    metadata.put("subStatus", "CONFIRMATION_REQUIRED");
-                    metadata.put("parsedData", answer);
-                    return StepResult.waiting(
-                            "I've analyzed your input. Please verify the details below to ensure neural accuracy.",
-                            metadata);
-                }
+            // INTERACTIVE mode asks the user to verify a free-text answer once.
+            // The awaiting-confirmation marker is what makes the second pass
+            // through this step count as the confirmation; without it a plain-text
+            // reply (every channel user) re-triggered the prompt forever.
+            String awaitingKey = AWAITING_CONFIRM_PREFIX + step.getStepOrder();
+            boolean awaitingConfirmation = Boolean.TRUE.equals(context.getInternal(awaitingKey));
+
+            if ("INTERACTIVE".equalsIgnoreCase(uiConfig.getInputMode())
+                    && answer instanceof String
+                    && !awaitingConfirmation) {
+                context.setInternal(awaitingKey, true);
+                context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);
+                Map<String, Object> metadata = prepareMetadata(step, uiConfig);
+                metadata.put("subStatus", "CONFIRMATION_REQUIRED");
+                metadata.put("parsedData", answer);
+                return StepResult.waiting(
+                        "I've analyzed your input. Please verify the details below to ensure neural accuracy.",
+                        metadata);
             }
+
+            context.removeInternal(awaitingKey);
 
             String successPrompt = (step.getMessage() != null && !step.getMessage().isEmpty())
                     ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())

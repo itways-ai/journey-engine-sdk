@@ -10,9 +10,12 @@ import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.service.StepHandlerRegistry;
 import com.itways.assistant.journey.engine.util.EngineUtils;
 import com.itways.assistant.journey.engine.util.JourneyStepGraph;
+import com.itways.assistant.journey.engine.util.VariableDiagnostics;
+import com.itways.assistant.journey.engine.util.VariablePath;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.util.*;
 
 @Slf4j
@@ -65,13 +68,22 @@ public class JourneyEngineImpl implements JourneyEngine {
             variableContext.mergeInputs(context, params);
         }
 
-        // Seed call stack so TRIGGER_JOURNEY can detect cycles without needing the parent Journey object
-        if (!context.getVariables().containsKey(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK)
-                && journey.getTriggerIntent() != null
-                && !journey.getTriggerIntent().isBlank()) {
-            context.setVariable(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK,
+        // The trigger stack arrives as a start-param (the only channel into a child
+        // run); lift it out of the author-visible variable map into engine internals.
+        Object inheritedStack = context.getVariables().remove(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK);
+        if (inheritedStack == null) {
+            inheritedStack = params.get(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK);
+        }
+        if (inheritedStack instanceof List<?> list) {
+            context.setInternal(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK, new ArrayList<>(list));
+        } else if (journey.getTriggerIntent() != null && !journey.getTriggerIntent().isBlank()) {
+            // Seed the call stack so TRIGGER_JOURNEY can detect cycles without
+            // needing the parent Journey object.
+            context.setInternal(TriggerJourneyStepHandler.TRIGGERED_JOURNEY_STACK,
                     new ArrayList<>(List.of(journey.getTriggerIntent())));
         }
+
+        seedRuntime(journey, context);
 
         // Durable RUNNING row before any business step; failure aborts the run.
         emitLifecycle(buildLifecycleEvent(journey, context, JourneyRunLifecycleEvent.STATUS_RUNNING, null, null));
@@ -114,15 +126,42 @@ public class JourneyEngineImpl implements JourneyEngine {
     public Map<String, Object> resume(Journey journey, ExecutionContext context, Map<String, Object> inputParams) {
         Map<String, Object> pending = inputParams != null ? new HashMap<>(inputParams) : new HashMap<>();
         variableContext.mergeInputs(context, pending);
-        context.setVariable(TriggerJourneyStepHandler.PENDING_RESUME_INPUT, pending);
+        context.setInternal(TriggerJourneyStepHandler.PENDING_RESUME_INPUT, pending);
         context.setStatus(ExecutionStatus.RUNNING);
         // Ensure lineage fields are present after deserialization.
         if (context.getRootExecutionId() == null || context.getRootExecutionId().isBlank()) {
             context.setRootExecutionId(context.getExecutionId());
         }
+        seedRuntime(journey, context);
         Map<String, Object> result = execute(journey, context);
-        context.getVariables().remove(TriggerJourneyStepHandler.PENDING_RESUME_INPUT);
+        context.removeInternal(TriggerJourneyStepHandler.PENDING_RESUME_INPUT);
         return finalizeResult(journey, context, result);
+    }
+
+    /**
+     * Publishes run identity into the {@code runtime} bucket so journey authors can
+     * reference {@code {{runtime.executionId}}}, {@code {{runtime.accountId}}} and
+     * friends. Previously {@code runtime} was created empty and never populated.
+     */
+    private void seedRuntime(Journey journey, ExecutionContext context) {
+        variableContext.writeRuntime(context, "executionId", context.getExecutionId());
+        variableContext.writeRuntime(context, "parentExecutionId", context.getParentExecutionId());
+        variableContext.writeRuntime(context, "rootExecutionId", context.getRootExecutionId());
+        variableContext.writeRuntime(context, "accountId", context.getAccountId());
+        variableContext.writeRuntime(context, "journeyId",
+                context.getJourneyId() != null ? context.getJourneyId() : journey.getId());
+        variableContext.writeRuntime(context, "journeyName", journey.getName());
+        variableContext.writeRuntime(context, "triggerIntent", journey.getTriggerIntent());
+        if (context.getStartedAt() != null) {
+            variableContext.writeRuntime(context, "startedAt", context.getStartedAt().toInstant().toString());
+        }
+    }
+
+    /** Per-step runtime facts: refreshed clock and the step currently executing. */
+    private void refreshStepRuntime(ExecutionContext context, JourneyStep step) {
+        variableContext.writeRuntime(context, "now", Instant.now().toString());
+        variableContext.writeRuntime(context, "stepOrder", step.getStepOrder());
+        variableContext.writeRuntime(context, "stepName", step.getStepName());
     }
 
     private Map<String, Object> execute(Journey journey, ExecutionContext context) {
@@ -187,15 +226,27 @@ public class JourneyEngineImpl implements JourneyEngine {
                 continue;
             }
 
+            refreshStepRuntime(context, step);
+
             long stepStart = System.currentTimeMillis();
             StepResult stepResult;
+            List<String> unresolvedVariables;
+            VariableDiagnostics.open();
             try {
                 stepResult = handler.execute(step, context);
             } catch (Exception e) {
                 log.error("Unhandled exception in handler for type: {}", step.getActionType(), e);
                 stepResult = StepResult.error("Internal Handler Error: " + e.getMessage());
+            } finally {
+                unresolvedVariables = VariableDiagnostics.close();
             }
             long stepEnd = System.currentTimeMillis();
+
+            if (!unresolvedVariables.isEmpty()) {
+                log.warn("Unresolved variables in step {} '{}' ({}) of journey {}: {}",
+                        stepOrder, step.getStepName(), step.getActionType(), journey.getId(),
+                        unresolvedVariables);
+            }
 
             Map<String, Object> metadata = stepResult.getMetadata();
             appendNestedStepResults(stepResults, metadata);
@@ -211,6 +262,9 @@ public class JourneyEngineImpl implements JourneyEngine {
             viewResult.put("startedAt", new Date(stepStart));
             viewResult.put("completedAt", new Date(stepEnd));
             viewResult.put("durationMs", stepEnd - stepStart);
+            if (!unresolvedVariables.isEmpty()) {
+                viewResult.put("unresolvedVariables", unresolvedVariables);
+            }
 
             if ("SUCCESS".equals(stepResult.getStatus())) {
                 viewResult.put("message", stepResult.getMessage());
@@ -245,23 +299,9 @@ public class JourneyEngineImpl implements JourneyEngine {
             } else if ("JUMP".equals(stepResult.getStatus())) {
                 int targetOrder = (Integer) stepResult.getMetadata().get("targetOrder");
                 variableContext.clearStepOutputsFromOrder(context, targetOrder);
-
-                // Clear legacy flat step* / sanitized name vars for steps >= targetOrder
-                java.util.Set<String> safeNamesToKeep = steps.stream()
-                        .filter(s -> s.getStepOrder() < targetOrder)
-                        .map(s -> engineUtils.sanitizeKey(s.getStepName() != null ? s.getStepName() : ("step" + s.getStepOrder())))
-                        .collect(java.util.stream.Collectors.toSet());
-
-                for (JourneyStep s : steps) {
-                    if (s.getStepOrder() >= targetOrder) {
-                        String name = engineUtils.sanitizeKey(s.getStepName() != null ? s.getStepName() : ("step" + s.getStepOrder()));
-                        if (!safeNamesToKeep.contains(name)) {
-                            context.getVariables().remove(name);
-                        }
-                        context.getVariables().remove("step" + s.getStepOrder());
-                    }
-                }
-
+                // Jumping back must roll back session state written by the steps
+                // being replayed, or an INCREMENT/APPEND compounds on every pass.
+                variableContext.clearStateWrittenFrom(context, targetOrder);
                 context.setCurrentStepIndex(targetOrder - 1);
                 i = 0;
                 continue;
@@ -350,9 +390,13 @@ public class JourneyEngineImpl implements JourneyEngine {
             }
         }
 
-        String userId = context.getVariable("userId") != null
-                ? String.valueOf(context.getVariable("userId"))
-                : null;
+        // Extracted entities land under inputs.entities; the flat root `userId`
+        // this used to read is gone, which silently nulled userId on every run.
+        Object userIdValue = VariablePath.resolve(context.getVariables(), "inputs.entities.userId");
+        if (userIdValue == null) {
+            userIdValue = VariablePath.resolve(context.getVariables(), "channel.user.id");
+        }
+        String userId = userIdValue != null ? String.valueOf(userIdValue) : null;
 
         return JourneyRunLifecycleEvent.builder()
                 .executionId(context.getExecutionId())

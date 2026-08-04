@@ -77,10 +77,30 @@ public class StepOutputSchemaHelper {
     }
 
     public StepOutputSchema userInputSchema(JourneyStep step) {
-        return StepOutputSchema.builder()
-                .stepType("USER_INPUT")
-                .fields(List.of(OutputField.of("output", "User Answer", "string")))
-                .build();
+        List<OutputField> fields = new ArrayList<>();
+        fields.add(OutputField.of("output", "User Answer", "string"));
+
+        // STRUCTURED / INTERACTIVE answers come back as a map keyed by field name,
+        // so each configured field is individually addressable.
+        ApiConfig config = loadApiConfig(step != null ? step.getApiConfig() : null);
+        String mode = config.getInputMode() != null ? config.getInputMode().toUpperCase() : "";
+        if (("STRUCTURED".equals(mode) || "INTERACTIVE".equals(mode)) && config.getFields() instanceof List<?> list) {
+            for (Object item : list) {
+                if (!(item instanceof Map<?, ?> map)) {
+                    continue;
+                }
+                Object name = map.get("name");
+                if (name == null || String.valueOf(name).isBlank()) {
+                    continue;
+                }
+                Object label = map.get("label");
+                fields.add(OutputField.dynamic(
+                        "output." + name,
+                        label != null && !String.valueOf(label).isBlank() ? String.valueOf(label) : String.valueOf(name),
+                        schemaType(map.get("type"))));
+            }
+        }
+        return StepOutputSchema.builder().stepType("USER_INPUT").fields(fields).build();
     }
 
     public StepOutputSchema responseSchema(JourneyStep step) {
@@ -114,10 +134,12 @@ public class StepOutputSchemaHelper {
     }
 
     public StepOutputSchema stateStoreSchema(JourneyStep step) {
-        ApiConfig config = loadApiConfig(step.getApiConfig());
+        ApiConfig config = loadApiConfig(step != null ? step.getApiConfig() : null);
         List<OutputField> fields = new ArrayList<>();
+        fields.add(OutputField.of("output", "Stored Value", "string"));
         if (config.getVariable() != null && !config.getVariable().isBlank()) {
-            fields.add(OutputField.of("state." + config.getVariable(), "Stored Value", "string"));
+            // Absolute: this lands in the shared state bucket, not steps.<order>.
+            fields.add(OutputField.absolute("state." + config.getVariable(), config.getVariable(), "string"));
         }
         return StepOutputSchema.builder()
                 .stepType("STATE_STORE")
@@ -126,20 +148,50 @@ public class StepOutputSchemaHelper {
                 .build();
     }
 
+    /**
+     * DATA_MAP declares its extraction schema in {@code actionTarget} as a JSON
+     * array of {@code {field, type, options, hint}} — that is what the builder
+     * serialises and what the handler feeds the LLM. This previously read
+     * {@code apiConfig.fields[].targetField}, which DATA_MAP never populates, so
+     * every DATA_MAP step reported zero outputs and its extracted values were
+     * invisible in the variable picker.
+     */
     public StepOutputSchema dataMapSchema(JourneyStep step) {
         List<OutputField> fields = new ArrayList<>();
-        ApiConfig config = loadApiConfig(step.getApiConfig());
-        if (config.getFields() instanceof List<?> list) {
-            for (Object item : list) {
-                if (item instanceof Map<?, ?> map && map.get("targetField") != null) {
-                    fields.add(OutputField.dynamic(
-                            "output." + map.get("targetField"),
-                            String.valueOf(map.get("targetField")),
-                            "string"));
-                }
+        for (Map<String, Object> entry : parseJsonObjectArray(step != null ? step.getActionTarget() : null)) {
+            Object name = entry.get("field");
+            if (name == null || String.valueOf(name).isBlank()) {
+                continue;
             }
+            fields.add(OutputField.dynamic(
+                    "output." + name,
+                    String.valueOf(name),
+                    schemaType(entry.get("type"))));
         }
         return StepOutputSchema.builder().stepType("DATA_MAP").fields(fields).build();
+    }
+
+    /** Maps builder field types onto the coarse types the variable picker shows. */
+    private static String schemaType(Object rawType) {
+        String type = rawType != null ? String.valueOf(rawType).toLowerCase() : "";
+        return switch (type) {
+            case "number", "integer", "decimal" -> "number";
+            case "boolean", "bool" -> "boolean";
+            case "object" -> "object";
+            case "array", "list" -> "array";
+            default -> "string";
+        };
+    }
+
+    private List<Map<String, Object>> parseJsonObjectArray(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<Map<String, Object>>>() {});
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     public StepOutputSchema genericOutputSchema(String stepType, String label) {
@@ -217,7 +269,9 @@ public class StepOutputSchemaHelper {
 
     private List<OutputField> parseDiscoveredVariables(JourneyStep step) {
         List<OutputField> fields = new ArrayList<>();
-        ApiConfig config = loadApiConfig(step.getApiConfig());
+        // getAllDefaultSchemas() describes every type with a null step, so every
+        // config-reading path here has to tolerate one.
+        ApiConfig config = loadApiConfig(step != null ? step.getApiConfig() : null);
         Object discovered = config.getDiscoveredVariables();
         if (discovered == null) {
             return fields;

@@ -2,6 +2,8 @@ package com.itways.assistant.journey.engine.context;
 
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.util.Placeholders;
+import com.itways.assistant.journey.engine.util.VariablePath;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
@@ -12,8 +14,7 @@ import java.util.Set;
 public class VariableContext {
 
     private static final Set<String> RESERVED_KEYS = Set.of(
-            "text", "files", "entities", "answer", "forceIntent",
-            "channel", "channelId", "channelType", "channelUser", "userInputAnswer");
+            "text", "files", "entities", "answer", "forceIntent", "channel");
 
     public void ensureStructure(ExecutionContext context) {
         Map<String, Object> vars = context.getVariables();
@@ -46,16 +47,12 @@ public class VariableContext {
         if (flatParams.containsKey("answer")) {
             inputs.put("answer", flatParams.get("answer"));
         }
-        if (flatParams.containsKey("userInputAnswer")) {
-            inputs.put("answer", flatParams.get("userInputAnswer"));
-        }
         if (flatParams.containsKey("entities")) {
             mergeEntities(inputs, flatParams.get("entities"));
         }
         if (flatParams.containsKey("channel") && flatParams.get("channel") instanceof Map) {
             mergeChannel(context, (Map<String, Object>) flatParams.get("channel"));
         }
-        normalizeLegacyChannel(context, flatParams);
 
         Map<String, Object> entities = getOrCreateEntities(inputs);
         for (Map.Entry<String, Object> entry : flatParams.entrySet()) {
@@ -78,24 +75,6 @@ public class VariableContext {
         }
         Map<String, Object> channel = (Map<String, Object>) context.getVariables().get("channel");
         channel.putAll(channelData);
-    }
-
-    @SuppressWarnings("unchecked")
-    private void normalizeLegacyChannel(ExecutionContext context, Map<String, Object> flatParams) {
-        if (flatParams.containsKey("channelId") || flatParams.containsKey("channelType")
-                || flatParams.containsKey("channelUser")) {
-            Map<String, Object> channel = new HashMap<>();
-            if (flatParams.containsKey("channelId")) {
-                channel.put("id", String.valueOf(flatParams.get("channelId")));
-            }
-            if (flatParams.containsKey("channelType")) {
-                channel.put("type", flatParams.get("channelType"));
-            }
-            if (flatParams.get("channelUser") instanceof Map) {
-                channel.put("user", flatParams.get("channelUser"));
-            }
-            mergeChannel(context, channel);
-        }
     }
 
     @SuppressWarnings("unchecked")
@@ -136,43 +115,56 @@ public class VariableContext {
         stepBucket.put(field, value);
     }
 
+    /** Engine-internal key recording which step wrote each state entry. */
+    private static final String STATE_PROVENANCE = "_stateWrites";
+
+    /**
+     * Writes state and records the writing step, so a JUMP backwards can roll
+     * back exactly the entries produced by the steps it is about to replay.
+     */
     @SuppressWarnings("unchecked")
-    public void writeState(ExecutionContext context, String key, Object value) {
+    public void writeState(ExecutionContext context, JourneyStep step, String key, Object value) {
         ensureStructure(context);
         Map<String, Object> state = (Map<String, Object>) context.getVariables().get("state");
         state.put(key, value);
+        stateProvenance(context).put(key, step.getStepOrder());
+    }
+
+    /** Removes state entries written by steps at or after {@code fromOrder}. */
+    public void clearStateWrittenFrom(ExecutionContext context, int fromOrder) {
+        ensureStructure(context);
+        Map<String, Integer> provenance = stateProvenance(context);
+        if (provenance.isEmpty()) {
+            return;
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> state = (Map<String, Object>) context.getVariables().get("state");
+        provenance.entrySet().removeIf(entry -> {
+            if (entry.getValue() == null || entry.getValue() < fromOrder) {
+                return false;
+            }
+            state.remove(entry.getKey());
+            return true;
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Integer> stateProvenance(ExecutionContext context) {
+        Object existing = context.getInternal(STATE_PROVENANCE);
+        if (existing instanceof Map) {
+            return (Map<String, Integer>) existing;
+        }
+        Map<String, Integer> provenance = new HashMap<>();
+        context.setInternal(STATE_PROVENANCE, provenance);
+        return provenance;
     }
 
     public Object read(ExecutionContext context, String dotPath) {
-        if (dotPath == null || dotPath.isEmpty()) {
-            return null;
-        }
-        String[] parts = dotPath.split("\\.");
-        Object current = context.getVariables();
-        for (String part : parts) {
-            if (current instanceof Map) {
-                current = ((Map<?, ?>) current).get(part);
-            } else {
-                return null;
-            }
-        }
-        return current;
+        return VariablePath.resolve(context.getVariables(), dotPath);
     }
 
     public String resolveForTemplate(ExecutionContext context, String text) {
-        if (text == null || !text.contains("{{")) {
-            return text;
-        }
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("\\{\\{([a-zA-Z0-9_\\.]+)\\}\\}");
-        java.util.regex.Matcher matcher = pattern.matcher(text);
-        StringBuilder sb = new StringBuilder();
-        while (matcher.find()) {
-            Object val = read(context, matcher.group(1));
-            String replacement = val != null ? val.toString() : "";
-            matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
-        }
-        matcher.appendTail(sb);
-        return sb.toString();
+        return Placeholders.replace(text, context.getVariables());
     }
 
     @SuppressWarnings("unchecked")
@@ -206,5 +198,15 @@ public class VariableContext {
     public Map<String, Object> getState(ExecutionContext context) {
         ensureStructure(context);
         return (Map<String, Object>) context.getVariables().get("state");
+    }
+
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> getRuntime(ExecutionContext context) {
+        ensureStructure(context);
+        return (Map<String, Object>) context.getVariables().get("runtime");
+    }
+
+    public void writeRuntime(ExecutionContext context, String key, Object value) {
+        getRuntime(context).put(key, value);
     }
 }

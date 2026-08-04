@@ -81,7 +81,7 @@ public class TriggerJourneyStepHandler implements StepHandler {
     @Override
     @SuppressWarnings("unchecked")
     public StepResult execute(JourneyStep step, ExecutionContext context) {
-        Object activeRaw = context.getVariable(ACTIVE_TRIGGERED_JOURNEY);
+        Object activeRaw = context.getInternal(ACTIVE_TRIGGERED_JOURNEY);
         Map<String, Object> childResult;
         String intent;
         Journey childJourney;
@@ -90,17 +90,17 @@ public class TriggerJourneyStepHandler implements StepHandler {
             intent = String.valueOf(activeMap.get("intent"));
             ExecutionContext childContext = deserializeChildContext(activeMap.get("childContext"));
             if (childContext == null) {
-                context.getVariables().remove(ACTIVE_TRIGGERED_JOURNEY);
+                context.removeInternal(ACTIVE_TRIGGERED_JOURNEY);
                 return StepResult.error("TRIGGER_JOURNEY: corrupt nested execution state");
             }
 
             childJourney = journeyLookupPort.findByTriggerIntent(context.getAccountId(), intent);
             if (childJourney == null) {
-                context.getVariables().remove(ACTIVE_TRIGGERED_JOURNEY);
+                context.removeInternal(ACTIVE_TRIGGERED_JOURNEY);
                 return StepResult.error("TRIGGER_JOURNEY: journey not found for intent '" + intent + "'");
             }
 
-            Map<String, Object> pending = context.getVariable(PENDING_RESUME_INPUT) instanceof Map<?, ?> p
+            Map<String, Object> pending = context.getInternal(PENDING_RESUME_INPUT) instanceof Map<?, ?> p
                     ? new HashMap<>((Map<String, Object>) p)
                     : new HashMap<>();
             log.info("Resuming triggered journey '{}' executionId={}", intent, childContext.getExecutionId());
@@ -130,6 +130,8 @@ public class TriggerJourneyStepHandler implements StepHandler {
             Map<String, Object> childParams = copyVariablesForChild(context.getVariables());
             List<String> childStack = new ArrayList<>(stack);
             childStack.add(intent);
+            // Start-params are the only channel into a child run, so the stack and
+            // lineage ids ride along here and are lifted into `internal` by start().
             childParams.put(TRIGGERED_JOURNEY_STACK, childStack);
             // Link child run identity to this parent.
             childParams.put(PARENT_EXECUTION_ID, context.getExecutionId());
@@ -157,7 +159,7 @@ public class TriggerJourneyStepHandler implements StepHandler {
                 active.put("executionId", childCtx.getExecutionId());
             }
             active.put("childContext", serializeChildContext(childCtx));
-            context.setVariable(ACTIVE_TRIGGERED_JOURNEY, active);
+            context.setInternal(ACTIVE_TRIGGERED_JOURNEY, active);
             context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);
 
             Map<String, Object> metadata = new HashMap<>();
@@ -170,7 +172,7 @@ public class TriggerJourneyStepHandler implements StepHandler {
             return StepResult.waiting(message, metadata);
         }
 
-        context.getVariables().remove(ACTIVE_TRIGGERED_JOURNEY);
+        context.removeInternal(ACTIVE_TRIGGERED_JOURNEY);
 
         if ("ERROR".equals(childStatus)) {
             String errMsg = childResult.get("message") != null
@@ -185,13 +187,12 @@ public class TriggerJourneyStepHandler implements StepHandler {
                     .build();
         }
 
-        // FINISHED
-        Object outputData = intent;
-        if (childCtx != null) {
-            Object last = childCtx.getVariable("lastStep");
-            if (last != null) {
-                outputData = last;
-            }
+        // FINISHED — this step's output is whatever the child journey last produced.
+        // Previously read the flat `lastStep` variable, which only REDIRECT ever
+        // wrote, so every other child journey silently yielded just the intent name.
+        Object outputData = lastChildOutput(childCtx);
+        if (outputData == null) {
+            outputData = intent;
         }
 
         String message = step.getMessage() != null
@@ -215,7 +216,7 @@ public class TriggerJourneyStepHandler implements StepHandler {
 
     private List<String> resolveTriggerStack(ExecutionContext context) {
         List<String> stack = new ArrayList<>();
-        Object raw = context.getVariable(TRIGGERED_JOURNEY_STACK);
+        Object raw = context.getInternal(TRIGGERED_JOURNEY_STACK);
         if (raw instanceof List<?> list) {
             for (Object item : list) {
                 if (item != null) {
@@ -224,6 +225,17 @@ public class TriggerJourneyStepHandler implements StepHandler {
             }
         }
         return stack;
+    }
+
+    /** The output of the highest-ordered step the child journey completed. */
+    private static Object lastChildOutput(ExecutionContext childCtx) {
+        if (childCtx == null || childCtx.getStepResults() == null || childCtx.getStepResults().isEmpty()) {
+            return null;
+        }
+        return childCtx.getStepResults().entrySet().stream()
+                .max(Map.Entry.comparingByKey())
+                .map(Map.Entry::getValue)
+                .orElse(null);
     }
 
     /**
@@ -302,6 +314,9 @@ public class TriggerJourneyStepHandler implements StepHandler {
         map.put("status", childCtx.getStatus() != null ? childCtx.getStatus().name() : ExecutionStatus.WAITING_FOR_INPUT.name());
         map.put("variables", childCtx.getVariables() != null ? new HashMap<>(childCtx.getVariables()) : new HashMap<>());
         map.put("stepResults", childCtx.getStepResults() != null ? new HashMap<>(childCtx.getStepResults()) : new HashMap<>());
+        // A paused grandchild lives in the child's internal map; drop it and the
+        // nesting chain cannot be resumed.
+        map.put("internal", childCtx.getInternal() != null ? new HashMap<>(childCtx.getInternal()) : new HashMap<>());
         map.put("startedAt", childCtx.getStartedAt());
         return map;
     }
@@ -314,6 +329,10 @@ public class TriggerJourneyStepHandler implements StepHandler {
         try {
             Map<String, Object> variables = map.get("variables") instanceof Map<?, ?> v
                     ? new HashMap<>((Map<String, Object>) v)
+                    : new HashMap<>();
+
+            Map<String, Object> internal = map.get("internal") instanceof Map<?, ?> i
+                    ? new HashMap<>((Map<String, Object>) i)
                     : new HashMap<>();
 
             Map<Integer, Object> stepResults = new HashMap<>();
@@ -354,6 +373,7 @@ public class TriggerJourneyStepHandler implements StepHandler {
                     .status(ExecutionStatus.valueOf(statusName))
                     .variables(variables)
                     .stepResults(stepResults)
+                    .internal(internal)
                     .startedAt(startedAt)
                     .build();
         } catch (Exception e) {

@@ -57,23 +57,39 @@ Map<String, Object> resumedResult = engine.resume(journey, context, userInput);
 ```
 
 ### 3. ExecutionContext
-Carries the "state" of a running journey, including:
-- **Variables**: Global key-value store accessible by all steps.
-- **Step Results**: History of what each step returned.
-- **Status**: Current lifecycle (RUNNING, WAITING, COMPLETED, ERROR).
+Carries the state of a running journey:
+- **Variables**: namespaced buckets — `inputs`, `steps`, `state`, `channel`, `runtime`.
+- **Step Results**: history of what each step returned.
+- **Internal**: engine bookkeeping (nested-journey stack, paused child context).
+  Deliberately separate from variables so it never reaches run history, the
+  CODE_SCRIPT sandbox, or an LLM prompt.
+- **Status**: current lifecycle (RUNNING, WAITING, COMPLETED, ERROR).
+
+### 4. Variables
+Values are addressed as `{{steps.3.output.email}}` — see
+[docs/Variables.md](../docs/Variables.md) for the buckets, path syntax, and how
+unresolved references are reported. `{{ }}` is the only placeholder syntax.
 
 ## 🧩 Supported Step Types
 
 | Type | Description |
 |------|-------------|
 | `API_CALL` | Executes HTTP requests with placeholder support. |
+| `CODE_SCRIPT` | Runs JavaScript against the variable buckets (GraalVM). |
 | `CONDITION` | Evaluates boolean logic to determine branch eligibility. |
-| `DATA_MAP` | Extracts and transforms variables using JSON paths. |
-| `MAIL` | Sends email notifications via configured SMTP. |
-| `RESPONSE` | Generates a successesful result for the client. |
+| `DATA_MAP` | AI-extracts structured fields from free text. |
+| `DELAY` | Gates the flow until a deadline has passed. |
+| `DOCUMENT_INSIGHT` | Reads uploaded documents. |
+| `HUMAN_APPROVAL` | Pauses for stakeholder sign-off. |
+| `JUMP` | Moves execution back to an earlier step. |
+| `KNOWLEDGE_RETRIEVAL` | Vector search over a knowledge base. |
+| `REDIRECT` | Resolves a URL for the client to navigate to. |
+| `RESPONSE` | Returns a message to the client. |
+| `SEND_MAIL` | Sends email notifications. |
+| `STATE_STORE` | Writes a value into session `state`. |
 | `SWITCH` | Multi-path branching based on variable values. |
-| `TEMPLATE` | Renders dynamic content using the Template Service. |
-| `INTENT` | Triggers specific AI intents mid-journey. |
+| `TEMPLATE_RENDER` | Renders dynamic content via the Template Service. |
+| `TRIGGER_JOURNEY` | Runs another journey inline. |
 | `USER_INPUT` | Pauses execution and waits for a client response. |
 
 ## 🛠 Extending the Engine

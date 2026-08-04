@@ -148,13 +148,9 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
     }
 
     private void storeKnowledgeOutput(JourneyStep step, ExecutionContext context, String answer, boolean found) {
+        // Namespaced only: {{steps.<order>.output}} and {{steps.<order>.found}}.
+        // The flat knowledge_found / step<N>_found / <name>_found flags are gone.
         variableContext.storeOutput(context, step, answer);
         variableContext.writeStepField(context, step, "found", found);
-        // Flat flags for legacy conditions (knowledge_found / stepN_found)
-        context.setVariable("knowledge_found", found);
-        context.setVariable("step" + step.getStepOrder() + "_found", found);
-        if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-            context.setVariable(engineUtils.sanitizeKey(step.getStepName()) + "_found", found);
-        }
     }
 }

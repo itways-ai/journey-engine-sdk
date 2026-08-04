@@ -3,6 +3,7 @@ package com.itways.assistant.journey.engine.handler;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
 import com.itways.assistant.journey.engine.model.StepResult;
@@ -18,6 +19,7 @@ import lombok.extern.slf4j.Slf4j;
 public class RedirectStepHandler implements StepHandler {
 
     private final EngineUtils engineUtils;
+    private final VariableContext variableContext;
 
     @Override
     public String getType() {
@@ -36,13 +38,9 @@ public class RedirectStepHandler implements StepHandler {
             return StepResult.error("REDIRECT: invalid URL — must start with http:// or https://");
         }
 
-        context.addStepResult(step.getStepOrder(), resolvedUrl);
-        context.setVariable("step" + step.getStepOrder(), resolvedUrl);
-        context.setVariable("lastStep", resolvedUrl);
-        context.setVariable("redirect_url", resolvedUrl);
-        if (step.getStepName() != null && !step.getStepName().isEmpty()) {
-            context.setVariable(engineUtils.sanitizeKey(step.getStepName()), resolvedUrl);
-        }
+        // Namespaced only — reachable as {{steps.<order>.output}}. This was the last
+        // handler writing flat root variables (step<N>, lastStep, redirect_url).
+        variableContext.storeOutput(context, step, resolvedUrl);
 
         log.info("↪️ REDIRECT step '{}' → {}", step.getStepName(), resolvedUrl);
 

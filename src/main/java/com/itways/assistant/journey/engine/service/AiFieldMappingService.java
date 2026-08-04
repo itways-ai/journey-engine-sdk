@@ -16,6 +16,7 @@ import com.itways.assistant.ai.service.AiService;
 import com.itways.assistant.journey.engine.config.TemplateRender;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.util.DataMapped;
+import com.itways.assistant.journey.engine.util.VariablePath;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -58,8 +59,10 @@ public class AiFieldMappingService {
 
         String userPrompt = templateRender.renderFromString(DataMapped.PROMPT, model);
 
+        // Attachments live under the namespaced inputs bucket; the flat root `files`
+        // this used to read has not existed since VariableContext was introduced.
         @SuppressWarnings("unchecked")
-        List<AiWrappedFile> files = (List<AiWrappedFile>) context.getVariable("files");
+        List<AiWrappedFile> files = (List<AiWrappedFile>) VariablePath.resolve(context.getVariables(), "inputs.files");
 
         AiRequestConfig aiRequestConfig = aiConfigProvider.getConfig(context.getAccountId());
 

@@ -49,7 +49,9 @@ public class StateStoreStepHandler implements StepHandler {
             ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
             String variableName = config.getVariable();
             String operation = config.getOperation() != null ? config.getOperation().toUpperCase() : "SET";
-            String sourceValue = engineUtils.replacePlaceholders(
+            // resolveSourceValue keeps the original type when the source is a lone
+            // placeholder, so `{{steps.2.output.score}}` stores 8 rather than "8".
+            Object sourceValue = engineUtils.resolveSourceValue(
                     config.getSource() != null ? config.getSource() : "", context.getVariables());
 
             if (variableName == null || variableName.isEmpty()) {
@@ -60,29 +62,40 @@ public class StateStoreStepHandler implements StepHandler {
             switch (operation) {
                 case "APPEND" -> {
                     Object existing = variableContext.getState(context).get(variableName);
-                    List<Object> list = (existing instanceof List) ? (List<Object>) existing : new ArrayList<>();
+                    List<Object> list = (existing instanceof List) ? new ArrayList<>((List<Object>) existing)
+                            : new ArrayList<>();
                     list.add(sourceValue);
                     finalValue = list;
                 }
                 case "INCREMENT" -> {
                     Object current = variableContext.getState(context).get(variableName);
                     int val = (current instanceof Number) ? ((Number) current).intValue() : 0;
-                    try {
-                        val += Integer.parseInt(sourceValue);
-                    } catch (Exception e) {
-                        val += 1;
-                    }
-                    finalValue = val;
+                    finalValue = val + toIncrement(sourceValue);
                 }
                 default -> finalValue = sourceValue;
             }
 
-            variableContext.writeState(context, variableName, finalValue);
+            variableContext.writeState(context, step, variableName, finalValue);
             variableContext.storeOutput(context, step, finalValue);
             return StepResult.success(finalValue, step.getMessage());
         } catch (Exception e) {
             log.error("State Store failed", e);
             return StepResult.error("State Persistence Failure: " + e.getMessage());
+        }
+    }
+
+    /** Step size for INCREMENT; a blank or non-numeric source counts as 1. */
+    private static int toIncrement(Object sourceValue) {
+        if (sourceValue instanceof Number number) {
+            return number.intValue();
+        }
+        if (sourceValue == null) {
+            return 1;
+        }
+        try {
+            return Integer.parseInt(String.valueOf(sourceValue).trim());
+        } catch (NumberFormatException e) {
+            return 1;
         }
     }
 

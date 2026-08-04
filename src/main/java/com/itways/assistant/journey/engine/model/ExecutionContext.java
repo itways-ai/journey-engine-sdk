@@ -32,6 +32,16 @@ public class ExecutionContext {
     @Builder.Default
     private Map<Integer, Object> stepResults = new HashMap<>();
 
+    /**
+     * Engine bookkeeping — nested-journey call stack, paused child context,
+     * pending resume input. Deliberately separate from {@link #variables}: these
+     * are not addressable by journey authors and must not reach run history, the
+     * variable picker, the CODE_SCRIPT sandbox, or DATA_MAP's LLM prompt (all of
+     * which serialise {@code variables} wholesale).
+     */
+    @Builder.Default
+    private Map<String, Object> internal = new HashMap<>();
+
     public void setVariable(String key, Object value) {
         variables.put(key, value);
     }
@@ -42,5 +52,17 @@ public class ExecutionContext {
 
     public void addStepResult(int stepOrder, Object result) {
         stepResults.put(stepOrder, result);
+    }
+
+    public void setInternal(String key, Object value) {
+        internal.put(key, value);
+    }
+
+    public Object getInternal(String key) {
+        return internal.get(key);
+    }
+
+    public void removeInternal(String key) {
+        internal.remove(key);
     }
 }
