@@ -1,7 +1,10 @@
 package com.itways.assistant.journey.engine.handler;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 import org.springframework.stereotype.Component;
 
@@ -25,6 +28,28 @@ import lombok.extern.slf4j.Slf4j;
 @RequiredArgsConstructor
 public class HumanApprovalStepHandler implements StepHandler {
 
+    /** Engine-internal marker: absolute instant this approval stops accepting a decision. */
+    static final String DEADLINE_PREFIX = "approvalDeadline_";
+
+    private static final String MODE_STAKEHOLDER = "STAKEHOLDER";
+    private static final int DEFAULT_TIMEOUT_HOURS = 24;
+
+    /**
+     * Answers that count as a decision. Anything outside these sets is treated as
+     * an unclear reply and re-prompted: this step used to accept <em>any</em>
+     * non-null answer as approval, so "no" granted the approval it was refusing.
+     * Both languages the product ships in are covered.
+     */
+    private static final Set<String> APPROVE = Set.of(
+            "yes", "y", "ok", "okay", "approve", "approved", "confirm", "confirmed",
+            "agree", "agreed", "accept", "accepted", "grant", "granted", "sure", "true",
+            "نعم", "موافق", "أوافق", "اوافق", "تم", "قبول", "مقبول");
+
+    private static final Set<String> REJECT = Set.of(
+            "no", "n", "nope", "reject", "rejected", "deny", "denied", "decline",
+            "declined", "disagree", "refuse", "refused", "cancel", "cancelled", "false",
+            "لا", "رفض", "أرفض", "ارفض", "مرفوض", "غير موافق");
+
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
@@ -41,34 +66,130 @@ public class HumanApprovalStepHandler implements StepHandler {
 
     @Override
     public StepOutputSchema describeOutputs(JourneyStep step) {
-        return schemaHelper.genericOutputSchema("HUMAN_APPROVAL", "Approval Decision");
+        return schemaHelper.genericOutputSchema("HUMAN_APPROVAL", "Approval Decision", "boolean");
     }
 
     @Override
     public StepResult execute(JourneyStep step, ExecutionContext context) {
-        Object answer = variableContext.getInputs(context).get("answer");
+        ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
+        String deadlineKey = DEADLINE_PREFIX + step.getStepOrder();
+        Map<String, Object> inputs = variableContext.getInputs(context);
+        Object answer = inputs.get("answer");
+
         if (answer != null) {
-            variableContext.storeOutput(context, step, answer);
-            variableContext.getInputs(context).remove("answer");
-            return StepResult.success(answer, "Human approval granted: " + answer);
+            inputs.remove("answer");
+            Boolean decision = interpret(answer);
+
+            if (decision == null) {
+                // Consumed but unusable. Ask again rather than guessing, and leave the
+                // deadline running so an endless stream of unclear replies still expires.
+                return awaitDecision(step, context, config, deadlineKey,
+                        "I could not tell whether that was an approval. Please reply with approve or reject.");
+            }
+
+            context.removeInternal(deadlineKey);
+            variableContext.storeOutput(context, step, decision);
+            String outcome = decision ? "Human approval granted." : "Human approval rejected.";
+            log.info("HUMAN_APPROVAL step '{}' resolved: {}", step.getStepName(), decision ? "APPROVED" : "REJECTED");
+            return StepResult.success(decision, outcome);
         }
 
+        // No answer this pass. An elapsed deadline auto-rejects: nothing should be
+        // approved by inaction. The platform has no scheduler, so this can only be
+        // noticed the next time the run is resumed (same gate DELAY uses).
+        Instant deadline = readDeadline(context.getInternal(deadlineKey));
+        if (deadline != null && !Instant.now().isBefore(deadline)) {
+            context.removeInternal(deadlineKey);
+            variableContext.storeOutput(context, step, Boolean.FALSE);
+            log.info("HUMAN_APPROVAL step '{}' auto-rejected: deadline {} elapsed.",
+                    step.getStepName(), deadline);
+            return StepResult.success(Boolean.FALSE,
+                    "Human approval timed out and was automatically rejected.");
+        }
+
+        return awaitDecision(step, context, config, deadlineKey, null);
+    }
+
+    /** Parks the run until a decision arrives, opening the timeout window on first entry. */
+    private StepResult awaitDecision(JourneyStep step, ExecutionContext context, ApiConfig config,
+                                     String deadlineKey, String overridePrompt) {
         context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);
-        ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
+
+        if (context.getInternal(deadlineKey) == null) {
+            int hours = config.getTimeout() != null && config.getTimeout() > 0
+                    ? config.getTimeout()
+                    : DEFAULT_TIMEOUT_HOURS;
+            context.setInternal(deadlineKey, Instant.now().plus(Duration.ofHours(hours)).toString());
+        }
+
+        boolean stakeholderMode = MODE_STAKEHOLDER.equalsIgnoreCase(config.getApprovalMode());
+        String stakeholders = engineUtils.replacePlaceholders(
+                config.getStakeholders() != null ? config.getStakeholders() : "", context.getVariables());
 
         Map<String, Object> metadata = new HashMap<>();
         metadata.put("type", "HUMAN_GOVERNANCE");
-        metadata.put("stakeholders", engineUtils.replacePlaceholders(
-                config.getStakeholders() != null ? config.getStakeholders() : "", context.getVariables()));
+        // approvalMode was collected by the builder and never read. The client needs
+        // it to tell "confirm this yourself" apart from "someone else must sign off".
+        metadata.put("approvalMode", stakeholderMode ? MODE_STAKEHOLDER : "SELF_CONFIRM");
         metadata.put("instruction", engineUtils.replacePlaceholders(
                 config.getInstruction() != null ? config.getInstruction() : "", context.getVariables()));
         metadata.put("awaiting", true);
+        metadata.put("expectedAnswers", Map.of("approve", "approve", "reject", "reject"));
+        metadata.put("resumeBy", context.getInternal(deadlineKey));
+        if (stakeholderMode) {
+            metadata.put("stakeholders", stakeholders);
+        }
 
-        String prompt = (step.getMessage() != null && !step.getMessage().isEmpty())
-                ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
-                : "Awaiting human approval from: " + config.getStakeholders();
+        String prompt = overridePrompt;
+        if (prompt == null) {
+            prompt = (step.getMessage() != null && !step.getMessage().isEmpty())
+                    ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
+                    : defaultPrompt(stakeholderMode, stakeholders);
+        }
 
         return StepResult.waiting(prompt, metadata);
     }
 
+    private static String defaultPrompt(boolean stakeholderMode, String stakeholders) {
+        if (stakeholderMode && stakeholders != null && !stakeholders.isBlank()) {
+            return "Awaiting approval from: " + stakeholders + ". Reply approve or reject.";
+        }
+        return "Please confirm to continue. Reply approve or reject.";
+    }
+
+    /**
+     * Maps an answer onto a decision, or null when it is neither. Booleans arrive
+     * from structured form replies; everything else is free text from a channel.
+     */
+    private static Boolean interpret(Object answer) {
+        if (answer instanceof Boolean bool) {
+            return bool;
+        }
+        String normalized = String.valueOf(answer).trim().toLowerCase();
+        // Strip trailing punctuation so "yes!" and "no." still read as decisions.
+        normalized = normalized.replaceAll("[\\p{Punct}\\s]+$", "");
+        if (normalized.isEmpty()) {
+            return null;
+        }
+        if (APPROVE.contains(normalized)) {
+            return Boolean.TRUE;
+        }
+        if (REJECT.contains(normalized)) {
+            return Boolean.FALSE;
+        }
+        return null;
+    }
+
+    /** An unreadable deadline must not trap the run, so treat it as not yet set. */
+    private static Instant readDeadline(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return Instant.parse(String.valueOf(raw));
+        } catch (Exception e) {
+            log.warn("HUMAN_APPROVAL: unreadable deadline '{}' — ignoring the timeout window", raw);
+            return null;
+        }
+    }
 }

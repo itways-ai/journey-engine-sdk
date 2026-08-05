@@ -195,9 +195,14 @@ public class StepOutputSchemaHelper {
     }
 
     public StepOutputSchema genericOutputSchema(String stepType, String label) {
+        return genericOutputSchema(stepType, label, "string");
+    }
+
+    /** Single-output schema for steps whose {@code output} is not a string (e.g. HUMAN_APPROVAL's boolean). */
+    public StepOutputSchema genericOutputSchema(String stepType, String label, String type) {
         return StepOutputSchema.builder()
                 .stepType(stepType)
-                .fields(List.of(OutputField.of("output", label, "string")))
+                .fields(List.of(OutputField.of("output", label, type)))
                 .build();
     }
 
