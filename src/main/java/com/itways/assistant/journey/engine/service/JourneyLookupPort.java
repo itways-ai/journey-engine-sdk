@@ -12,9 +12,10 @@ public interface JourneyLookupPort {
     /**
      * Finds a journey by trigger intent for the given account.
      *
-     * @param accountId account that owns the journey
+     * @param accountId   account that owns the journey
+     * @param assistantId product scope; null restricts the search to shared journeys
      * @param intent    trigger intent name (e.g. {@code ORDER_STATUS})
      * @return the journey including steps, or {@code null} if not found
      */
-    Journey findByTriggerIntent(String accountId, String intent);
+    Journey findByTriggerIntent(String accountId, java.util.UUID assistantId, String intent);
 }

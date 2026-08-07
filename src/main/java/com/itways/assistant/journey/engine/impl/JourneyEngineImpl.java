@@ -1,6 +1,7 @@
 package com.itways.assistant.journey.engine.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.itways.assistant.journey.engine.context.EndUserAuth;
 import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.handler.TriggerJourneyStepHandler;
 import com.itways.assistant.journey.engine.model.*;
@@ -39,7 +40,8 @@ public class JourneyEngineImpl implements JourneyEngine {
     }
 
     @Override
-    public Map<String, Object> start(Journey journey, String accountId, Map<String, Object> initialParams) {
+    public Map<String, Object> start(Journey journey, String accountId, java.util.UUID assistantId,
+            Map<String, Object> initialParams) {
         Map<String, Object> params = initialParams != null ? new HashMap<>(initialParams) : new HashMap<>();
 
         String executionId = UUID.randomUUID().toString();
@@ -55,6 +57,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                 .rootExecutionId(rootExecutionId)
                 .journeyId(journey.getId())
                 .accountId(accountId)
+                .assistantId(assistantId)
                 .currentStepIndex(-1)
                 .status(ExecutionStatus.RUNNING)
                 .variables(new HashMap<>())
@@ -67,6 +70,11 @@ public class JourneyEngineImpl implements JourneyEngine {
         } else {
             variableContext.mergeInputs(context, params);
         }
+
+        // The end user's bearer token arrives as a reserved start-param. Lift it into
+        // engine internals before any step runs, so it never reaches run history,
+        // the variable picker, CODE_SCRIPT or DATA_MAP's prompt.
+        EndUserAuth.lift(context, params);
 
         // The trigger stack arrives as a start-param (the only channel into a child
         // run); lift it out of the author-visible variable map into engine internals.
@@ -126,6 +134,10 @@ public class JourneyEngineImpl implements JourneyEngine {
     public Map<String, Object> resume(Journey journey, ExecutionContext context, Map<String, Object> inputParams) {
         Map<String, Object> pending = inputParams != null ? new HashMap<>(inputParams) : new HashMap<>();
         variableContext.mergeInputs(context, pending);
+        // Each turn carries a freshly read token: hosts rotate them (Vikunja's access
+        // JWT lives ~10 minutes), so a resumed run must adopt the new one rather than
+        // keep the value captured when the journey started.
+        EndUserAuth.lift(context, pending);
         context.setInternal(TriggerJourneyStepHandler.PENDING_RESUME_INPUT, pending);
         context.setStatus(ExecutionStatus.RUNNING);
         // Ensure lineage fields are present after deserialization.
@@ -331,12 +343,30 @@ public class JourneyEngineImpl implements JourneyEngine {
         result.put("stepResults", stepResults);
         result.put("context", context);
 
-        // Final message extraction (last success message)
-        for (int idx = stepResults.size() - 1; idx >= 0; idx--) {
-            Map<String, Object> r = stepResults.get(idx);
-            if ("SUCCESS".equals(r.get("status")) && r.containsKey("message") && r.get("message") != null) {
-                result.put("message", r.get("message"));
-                break;
+        // Final message extraction.
+        //
+        // A halted run takes the *failing* step's message, not the last
+        // successful one. Reading only SUCCESS left every halt silent — reject a
+        // HUMAN_APPROVAL and the assistant said nothing at all, which reads as a
+        // crash rather than as the gate doing its job. The stopping reason is the
+        // most useful thing to say, so it wins when the run ended in ERROR.
+        String finalStatus = (String) result.get("status");
+        if ("ERROR".equals(finalStatus)) {
+            for (int idx = stepResults.size() - 1; idx >= 0; idx--) {
+                Map<String, Object> r = stepResults.get(idx);
+                if ("ERROR".equals(r.get("status")) && r.get("message") != null) {
+                    result.put("message", r.get("message"));
+                    break;
+                }
+            }
+        }
+        if (result.get("message") == null) {
+            for (int idx = stepResults.size() - 1; idx >= 0; idx--) {
+                Map<String, Object> r = stepResults.get(idx);
+                if ("SUCCESS".equals(r.get("status")) && r.containsKey("message") && r.get("message") != null) {
+                    result.put("message", r.get("message"));
+                    break;
+                }
             }
         }
 

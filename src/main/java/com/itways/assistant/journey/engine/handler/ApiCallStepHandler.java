@@ -17,6 +17,7 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.RestTemplate;
 
+import com.itways.assistant.journey.engine.context.EndUserAuth;
 import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
@@ -66,8 +67,9 @@ public class ApiCallStepHandler implements StepHandler {
 
 			HttpHeaders headers = new HttpHeaders();
 			headers.setContentType(MediaType.APPLICATION_JSON);
+			Map<String, Object> headerScope = headerScope(context);
 			config.getHeaders()
-					.forEach((k, v) -> headers.set(k, engineUtils.replacePlaceholders(v, context.getVariables())));
+					.forEach((k, v) -> headers.set(k, engineUtils.replacePlaceholders(v, headerScope)));
 
 			Object processedBody = processBody(config.getBody(), context.getVariables());
 
@@ -96,6 +98,32 @@ public class ApiCallStepHandler implements StepHandler {
 		 log.error("API_CALL step '{}' unexpected error", step.getStepName(), e);
 			return StepResult.error("API Call Failed: " + e.getMessage());
 		}
+	}
+
+	/**
+	 * Variable scope used for request-header interpolation only.
+	 *
+	 * <p>
+	 * Returns the journey's own variables plus the end user's token under
+	 * {@code auth.userToken}, so a step can declare
+	 * {@code "Authorization": "Bearer {{auth.userToken}}"} and call a customer API
+	 * as the signed-in user.
+	 *
+	 * <p>
+	 * The augmented map is built per call and thrown away: it is never written
+	 * back to the context, so the credential stays out of run history, the
+	 * variable picker, the {@code CODE_SCRIPT} sandbox and {@code DATA_MAP}'s LLM
+	 * prompt. Headers are the only scope that gets it — URLs end up in logs and
+	 * bodies are persisted with the run.
+	 */
+	private Map<String, Object> headerScope(ExecutionContext context) {
+		String token = EndUserAuth.token(context);
+		if (token == null) {
+			return context.getVariables();
+		}
+		Map<String, Object> scope = new HashMap<>(context.getVariables());
+		scope.put(EndUserAuth.SCOPE, Map.of(EndUserAuth.FIELD_USER_TOKEN, token));
+		return scope;
 	}
 
 	private Object processBody(Object body, Map<String, Object> variables) {

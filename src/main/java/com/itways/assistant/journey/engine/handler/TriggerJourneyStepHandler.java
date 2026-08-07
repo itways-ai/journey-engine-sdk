@@ -94,7 +94,7 @@ public class TriggerJourneyStepHandler implements StepHandler {
                 return StepResult.error("TRIGGER_JOURNEY: corrupt nested execution state");
             }
 
-            childJourney = journeyLookupPort.findByTriggerIntent(context.getAccountId(), intent);
+            childJourney = journeyLookupPort.findByTriggerIntent(context.getAccountId(), context.getAssistantId(), intent);
             if (childJourney == null) {
                 context.removeInternal(ACTIVE_TRIGGERED_JOURNEY);
                 return StepResult.error("TRIGGER_JOURNEY: journey not found for intent '" + intent + "'");
@@ -122,7 +122,7 @@ public class TriggerJourneyStepHandler implements StepHandler {
                         "TRIGGER_JOURNEY: max nesting depth (" + MAX_TRIGGER_DEPTH + ") exceeded");
             }
 
-            childJourney = journeyLookupPort.findByTriggerIntent(context.getAccountId(), intent);
+            childJourney = journeyLookupPort.findByTriggerIntent(context.getAccountId(), context.getAssistantId(), intent);
             if (childJourney == null) {
                 return StepResult.error("TRIGGER_JOURNEY: journey not found for intent '" + intent + "'");
             }
@@ -140,7 +140,10 @@ public class TriggerJourneyStepHandler implements StepHandler {
 
             log.info("Starting triggered journey '{}' parentExecutionId={} rootExecutionId={}",
                     intent, context.getExecutionId(), rootId);
-            childResult = journeyEngine.start(childJourney, context.getAccountId(), childParams);
+            // The child inherits the parent's product scope, so a shared journey
+            // triggered inside one product cannot reach another product's flows.
+            childResult = journeyEngine.start(childJourney, context.getAccountId(), context.getAssistantId(),
+                    childParams);
         }
 
         String childStatus = (String) childResult.get("status");

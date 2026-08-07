@@ -89,9 +89,20 @@ public class HumanApprovalStepHandler implements StepHandler {
 
             context.removeInternal(deadlineKey);
             variableContext.storeOutput(context, step, decision);
-            String outcome = decision ? "Human approval granted." : "Human approval rejected.";
             log.info("HUMAN_APPROVAL step '{}' resolved: {}", step.getStepName(), decision ? "APPROVED" : "REJECTED");
-            return StepResult.success(decision, outcome);
+
+            if (decision) {
+                return StepResult.success(Boolean.TRUE, "Human approval granted.");
+            }
+            // A refusal must stop the run. Returning success here let the engine
+            // walk straight into the step the gate was protecting, so answering
+            // "reject" performed the very action being refused — the opposite of
+            // what a step named HUMAN_APPROVAL promises.
+            //
+            // The decision is still stored as this step's output before we return,
+            // so a journey that wants an explicit rejection path can branch on it;
+            // the default, though, is now to halt.
+            return StepResult.error("Human approval rejected.");
         }
 
         // No answer this pass. An elapsed deadline auto-rejects: nothing should be
@@ -103,8 +114,9 @@ public class HumanApprovalStepHandler implements StepHandler {
             variableContext.storeOutput(context, step, Boolean.FALSE);
             log.info("HUMAN_APPROVAL step '{}' auto-rejected: deadline {} elapsed.",
                     step.getStepName(), deadline);
-            return StepResult.success(Boolean.FALSE,
-                    "Human approval timed out and was automatically rejected.");
+            // Same reasoning as an explicit refusal: an expired gate must not let
+            // the protected step run. Nothing is approved by inaction.
+            return StepResult.error("Human approval timed out and was automatically rejected.");
         }
 
         return awaitDecision(step, context, config, deadlineKey, null);

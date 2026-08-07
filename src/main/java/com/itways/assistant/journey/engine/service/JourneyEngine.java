@@ -9,7 +9,8 @@ public interface JourneyEngine {
 	/**
 	 * Starts a new journey execution.
 	 */
-	Map<String, Object> start(Journey journey, String accountId, Map<String, Object> initialParams);
+	Map<String, Object> start(Journey journey, String accountId, java.util.UUID assistantId,
+			Map<String, Object> initialParams);
 
 	/**
 	 * Resumes an existing journey execution.

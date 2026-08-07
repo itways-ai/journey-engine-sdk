@@ -22,6 +22,12 @@ public class ExecutionContext {
     private String rootExecutionId;
     private Long journeyId;
     private String accountId;
+    /**
+     * Product scope for this run. Nested TRIGGER_JOURNEY lookups and knowledge
+     * retrieval stay inside it, so a shared journey invoked by one product can
+     * never reach into another product's flows or knowledge.
+     */
+    private java.util.UUID assistantId;
     private int currentStepIndex;
     private ExecutionStatus status;
     private Date startedAt;
