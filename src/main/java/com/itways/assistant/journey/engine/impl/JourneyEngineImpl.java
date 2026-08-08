@@ -8,6 +8,7 @@ import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.JourneyEngine;
 import com.itways.assistant.journey.engine.service.JourneyRunLifecyclePort;
 import com.itways.assistant.journey.engine.service.StepHandler;
+import com.itways.assistant.journey.engine.service.StepObserver;
 import com.itways.assistant.journey.engine.service.StepHandlerRegistry;
 import com.itways.assistant.journey.engine.util.EngineUtils;
 import com.itways.assistant.journey.engine.util.JourneyStepGraph;
@@ -42,6 +43,12 @@ public class JourneyEngineImpl implements JourneyEngine {
     @Override
     public Map<String, Object> start(Journey journey, String accountId, java.util.UUID assistantId,
             Map<String, Object> initialParams) {
+        return start(journey, accountId, assistantId, initialParams, StepObserver.NOOP);
+    }
+
+    @Override
+    public Map<String, Object> start(Journey journey, String accountId, java.util.UUID assistantId,
+            Map<String, Object> initialParams, StepObserver observer) {
         Map<String, Object> params = initialParams != null ? new HashMap<>(initialParams) : new HashMap<>();
 
         String executionId = UUID.randomUUID().toString();
@@ -96,7 +103,27 @@ public class JourneyEngineImpl implements JourneyEngine {
         // Durable RUNNING row before any business step; failure aborts the run.
         emitLifecycle(buildLifecycleEvent(journey, context, JourneyRunLifecycleEvent.STATUS_RUNNING, null, null));
 
-        return finalizeResult(journey, context, execute(journey, context));
+        return finalizeResult(journey, context, execute(journey, context, observer));
+    }
+
+    /**
+     * Hands a finished step to the observer.
+     *
+     * <p>
+     * Isolated because the observer belongs to a transport — typically an SSE
+     * connection the client may already have dropped — and a broken pipe there
+     * must not abort a journey that is otherwise running fine. The run is the
+     * source of truth; streaming is only a view of it.
+     */
+    private void publish(StepObserver observer, Map<String, Object> view) {
+        if (observer == null || observer == StepObserver.NOOP) {
+            return;
+        }
+        try {
+            observer.onStep(view);
+        } catch (Exception e) {
+            log.debug("Step observer failed; continuing the run", e);
+        }
     }
 
     private boolean isStructuredVariableMap(Map<String, Object> params) {
@@ -132,6 +159,12 @@ public class JourneyEngineImpl implements JourneyEngine {
 
     @Override
     public Map<String, Object> resume(Journey journey, ExecutionContext context, Map<String, Object> inputParams) {
+        return resume(journey, context, inputParams, StepObserver.NOOP);
+    }
+
+    @Override
+    public Map<String, Object> resume(Journey journey, ExecutionContext context, Map<String, Object> inputParams,
+            StepObserver observer) {
         Map<String, Object> pending = inputParams != null ? new HashMap<>(inputParams) : new HashMap<>();
         variableContext.mergeInputs(context, pending);
         // Each turn carries a freshly read token: hosts rotate them (Vikunja's access
@@ -145,7 +178,7 @@ public class JourneyEngineImpl implements JourneyEngine {
             context.setRootExecutionId(context.getExecutionId());
         }
         seedRuntime(journey, context);
-        Map<String, Object> result = execute(journey, context);
+        Map<String, Object> result = execute(journey, context, observer);
         context.removeInternal(TriggerJourneyStepHandler.PENDING_RESUME_INPUT);
         return finalizeResult(journey, context, result);
     }
@@ -176,7 +209,7 @@ public class JourneyEngineImpl implements JourneyEngine {
         variableContext.writeRuntime(context, "stepName", step.getStepName());
     }
 
-    private Map<String, Object> execute(Journey journey, ExecutionContext context) {
+    private Map<String, Object> execute(Journey journey, ExecutionContext context, StepObserver observer) {
 
         log.debug("START JOURNEY EXECUTION >> journeyId={} accountId={} executionId={}",
                 journey.getId(), context.getAccountId(), context.getExecutionId());
@@ -289,6 +322,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                 }
                 mergeStepMetadata(viewResult, metadata);
                 stepResults.add(viewResult);
+                publish(observer, viewResult);
                 context.setCurrentStepIndex(stepOrder);
                 // Handlers store output via VariableContext.storeOutput; ensure stepResults map is set
                 if (context.getStepResults().get(stepOrder) == null && stepResult.getData() != null) {
@@ -300,6 +334,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                     viewResult.put("message", stepResult.getMessage());
                     mergeStepMetadata(viewResult, metadata);
                     stepResults.add(viewResult);
+                publish(observer, viewResult);
                 }
                 result.put("status", "WAITING");
                 result.put("stepResults", stepResults);
@@ -321,6 +356,7 @@ public class JourneyEngineImpl implements JourneyEngine {
                 viewResult.put("message", stepResult.getMessage());
                 mergeStepMetadata(viewResult, metadata);
                 stepResults.add(viewResult);
+                publish(observer, viewResult);
                 if (step.isContinueOnError()) {
                     context.addStepResult(stepOrder, "FAILED");
                     context.setCurrentStepIndex(stepOrder);
