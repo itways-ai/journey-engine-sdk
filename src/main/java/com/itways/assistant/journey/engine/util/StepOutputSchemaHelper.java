@@ -244,6 +244,16 @@ public class StepOutputSchemaHelper {
         return genericDefinition("TEMPLATE_RENDER", "ai", "Template Render", "hgi-magic-wand-01", "step-template");
     }
 
+    /** TEMPLATE_RENDER publishes the rendered text plus the template's declared type. */
+    public StepOutputSchema templateRenderSchema() {
+        return StepOutputSchema.builder()
+                .stepType("TEMPLATE_RENDER")
+                .fields(List.of(
+                        OutputField.of("output", "Rendered Output", "string"),
+                        OutputField.of("contentType", "Content Type", "string")))
+                .build();
+    }
+
     public StepDefinition dataMapDefinition() {
         return genericDefinition("DATA_MAP", "system", "Data Map", "hgi-database-01", "step-data-map");
     }

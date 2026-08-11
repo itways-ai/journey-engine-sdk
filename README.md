@@ -92,6 +92,22 @@ unresolved references are reported. `{{ }}` is the only placeholder syntax.
 | `TRIGGER_JOURNEY` | Runs another journey inline. |
 | `USER_INPUT` | Pauses execution and waits for a client response. |
 
+## 🔌 Ports the Host Must Provide
+
+Some handlers reach outside the engine. The SDK declares the interface; the host application
+supplies the bean. A missing one is a startup failure, not a runtime one — the handler will not
+get its dependency.
+
+| Port | Needed by | Host must |
+|---|---|---|
+| `JourneyLookupPort` | `TRIGGER_JOURNEY` | Resolve a journey by intent or id |
+| `JourneyRunLifecyclePort` | the engine | Persist run state across a pause |
+| `KnowledgeBasePort` | `KNOWLEDGE_RETRIEVAL` | Run a vector search |
+| `MailDeliveryPort` | `SEND_MAIL` | Deliver mail with per-step SMTP settings |
+| `TemplateRenderPort` | `TEMPLATE_RENDER` | Render a stored template |
+
+In this platform all five are implemented by **speech-service**, which is where the engine runs.
+
 ## 🛠 Extending the Engine
 
 To add a new step type, simply implement the `StepHandler` interface and mark it as a `@Component`:

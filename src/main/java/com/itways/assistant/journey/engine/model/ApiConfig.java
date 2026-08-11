@@ -28,6 +28,15 @@ public class ApiConfig {
     private Object fields;
     private Object rules;
 
+    /**
+     * TEMPLATE_RENDER: template variable name → the journey expression supplying it,
+     * e.g. {@code {"firstName": "{{inputs.entities.name}}"}}. Only what is named here
+     * reaches the template — the journey's variable namespaces are deliberately not
+     * exposed to FreeMarker.
+     */
+    @Builder.Default
+    private Map<String, String> bindings = new HashMap<>();
+
     // Elite: Knowledge Retrieval
     private String query;
     private String indexName;
