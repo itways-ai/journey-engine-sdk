@@ -126,9 +126,28 @@ public class ApiCallStepHandler implements StepHandler {
 		return scope;
 	}
 
+	/**
+	 * Interpolates the request body, preserving the resolved type wherever a
+	 * value is a single placeholder.
+	 *
+	 * <p>
+	 * {@code "{{steps.3.output.priority}}"} yields the number 5, not the string
+	 * "5". Every other place the engine resolves an authored value already works
+	 * this way — {@code STATE_STORE}'s source and {@code TEMPLATE_RENDER}'s
+	 * bindings both go through {@code resolveSourceValue} — and only request
+	 * bodies stringified everything. That made typed fields unreachable: any host
+	 * with an integer or boolean column rejected the body outright (Vikunja
+	 * answers a bare "Invalid model provided"), so journeys could only ever send
+	 * hard-coded literals for them, and a full-replace API like Vikunja's task
+	 * update silently wiped the fields the journey could not restate.
+	 *
+	 * <p>
+	 * Mixed templates such as {@code "Order {{id}} confirmed"} still resolve to a
+	 * String, which is the only sensible reading of them.
+	 */
 	private Object processBody(Object body, Map<String, Object> variables) {
 		if (body instanceof String) {
-			return engineUtils.replacePlaceholders((String) body, variables);
+			return engineUtils.resolveSourceValue((String) body, variables);
 		} else if (body instanceof Map) {
 			Map<String, Object> bodyMap = (Map<String, Object>) body;
 			Map<String, Object> processedMap = new HashMap<>();

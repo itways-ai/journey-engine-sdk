@@ -1,5 +1,7 @@
 package com.itways.assistant.journey.engine.model;
 
+import com.itways.assistant.journey.engine.language.ConversationLanguage;
+
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -32,6 +34,23 @@ public class ExecutionContext {
     private ExecutionStatus status;
     private Date startedAt;
 
+    /**
+     * The language this conversation is being conducted in.
+     *
+     * <p>
+     * A field on the context rather than a per-turn parameter because it has to
+     * survive the run parking on {@code WAITING}: the context is what gets
+     * serialised to Redis, so this is the only place a language can live and
+     * still be there when the user's next message arrives. Without it every
+     * resumed turn would re-detect from whatever the user just typed, and a
+     * one-word answer would flip a whole journey's wording.
+     *
+     * <p>
+     * Null only before the first resolution; {@link #resolvedLanguage()} is the
+     * accessor that never returns null.
+     */
+    private ConversationLanguage language;
+
     @Builder.Default
     private Map<String, Object> variables = new HashMap<>();
 
@@ -39,7 +58,7 @@ public class ExecutionContext {
     private Map<Integer, Object> stepResults = new HashMap<>();
 
     /**
-     * Engine bookkeeping — nested-journey call stack, paused child context,
+     * Engine bookkeeping â nested-journey call stack, paused child context,
      * pending resume input. Deliberately separate from {@link #variables}: these
      * are not addressable by journey authors and must not reach run history, the
      * variable picker, the CODE_SCRIPT sandbox, or DATA_MAP's LLM prompt (all of
@@ -70,5 +89,10 @@ public class ExecutionContext {
 
     public void removeInternal(String key) {
         internal.remove(key);
+    }
+
+    /** Never null — falls back to {@link ConversationLanguage#DEFAULT}. */
+    public ConversationLanguage resolvedLanguage() {
+        return language != null ? language : ConversationLanguage.DEFAULT;
     }
 }

@@ -9,7 +9,10 @@ import java.util.Map;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
+import com.itways.assistant.journey.engine.context.EndUserAuth;
 import com.itways.assistant.journey.engine.context.VariableContext;
+import com.itways.assistant.journey.engine.language.ConversationLanguage;
+import com.itways.assistant.journey.engine.language.LanguageParams;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.ExecutionStatus;
 import com.itways.assistant.journey.engine.model.Journey;
@@ -103,6 +106,11 @@ public class TriggerJourneyStepHandler implements StepHandler {
             Map<String, Object> pending = context.getInternal(PENDING_RESUME_INPUT) instanceof Map<?, ?> p
                     ? new HashMap<>((Map<String, Object>) p)
                     : new HashMap<>();
+            // The parent lifted this turn's token out of `pending` before storing
+            // it, and hosts rotate tokens between turns, so hand the child the
+            // parent's current one rather than letting it keep the value it
+            // captured when it started.
+            passUserToken(context, pending);
             log.info("Resuming triggered journey '{}' executionId={}", intent, childContext.getExecutionId());
             childResult = journeyEngine.resume(childJourney, childContext, pending);
         } else {
@@ -137,6 +145,14 @@ public class TriggerJourneyStepHandler implements StepHandler {
             childParams.put(PARENT_EXECUTION_ID, context.getExecutionId());
             String rootId = context.getRootExecutionId() != null ? context.getRootExecutionId() : context.getExecutionId();
             childParams.put(ROOT_EXECUTION_ID, rootId);
+            // Without this the child runs anonymously: the token lives in the
+            // parent's `internal`, which copyVariablesForChild deliberately does
+            // not copy, so every `{{auth.userToken}}` in the child resolved to
+            // nothing and its first host call came back 401.
+            passUserToken(context, childParams);
+            // Without this the child re-resolves from scratch and answers in the
+            // account default while its parent is mid-conversation in Arabic.
+            LanguageParams.inherit(childParams, context);
 
             log.info("Starting triggered journey '{}' parentExecutionId={} rootExecutionId={}",
                     intent, context.getExecutionId(), rootId);
@@ -215,6 +231,24 @@ public class TriggerJourneyStepHandler implements StepHandler {
                 .actionTarget(intent)
                 .metadata(metadata)
                 .build();
+    }
+
+    /**
+     * Hands the end user's token down to a child run.
+     *
+     * <p>
+     * Start-params are the only channel into a child, and the token cannot ride
+     * the variable map it inherits — {@link EndUserAuth} exists precisely to
+     * keep it out of anything a journey author or the run history can see. So
+     * it travels as the same reserved param the channel layer uses, and the
+     * child's own {@code start}/{@code resume} lifts it straight back into
+     * internals before its first step executes.
+     */
+    private static void passUserToken(ExecutionContext parent, Map<String, Object> childParams) {
+        String token = EndUserAuth.token(parent);
+        if (token != null) {
+            childParams.put(EndUserAuth.PARAM_USER_TOKEN, token);
+        }
     }
 
     private List<String> resolveTriggerStack(ExecutionContext context) {
@@ -320,6 +354,10 @@ public class TriggerJourneyStepHandler implements StepHandler {
         // A paused grandchild lives in the child's internal map; drop it and the
         // nesting chain cannot be resumed.
         map.put("internal", childCtx.getInternal() != null ? new HashMap<>(childCtx.getInternal()) : new HashMap<>());
+        // Field-by-field, so anything not named here is lost when a nested run
+        // parks. A paused child that came back speaking the account default was
+        // exactly that bug for the language.
+        map.put("language", childCtx.resolvedLanguage().code());
         map.put("startedAt", childCtx.getStartedAt());
         return map;
     }
@@ -366,6 +404,9 @@ public class TriggerJourneyStepHandler implements StepHandler {
             String parentExecutionId = map.get("parentExecutionId") != null ? String.valueOf(map.get("parentExecutionId")) : null;
             String rootExecutionId = map.get("rootExecutionId") != null ? String.valueOf(map.get("rootExecutionId")) : executionId;
 
+            ConversationLanguage language = ConversationLanguage.parse(
+                    map.get("language") != null ? String.valueOf(map.get("language")) : null);
+
             return ExecutionContext.builder()
                     .executionId(executionId)
                     .parentExecutionId(parentExecutionId)
@@ -378,6 +419,7 @@ public class TriggerJourneyStepHandler implements StepHandler {
                     .stepResults(stepResults)
                     .internal(internal)
                     .startedAt(startedAt)
+                    .language(language)
                     .build();
         } catch (Exception e) {
             log.error("Failed to deserialize nested journey context", e);

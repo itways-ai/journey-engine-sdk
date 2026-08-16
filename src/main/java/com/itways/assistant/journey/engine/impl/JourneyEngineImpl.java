@@ -2,12 +2,17 @@ package com.itways.assistant.journey.engine.impl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.journey.engine.context.EndUserAuth;
+import com.itways.assistant.journey.engine.language.EngineMessages;
+import com.itways.assistant.journey.engine.language.StepLocalizer;
+import com.itways.assistant.journey.engine.language.StepText;
+import com.itways.assistant.journey.engine.language.LanguageParams;
 import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.handler.TriggerJourneyStepHandler;
 import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.JourneyEngine;
 import com.itways.assistant.journey.engine.service.JourneyRunLifecyclePort;
 import com.itways.assistant.journey.engine.service.StepHandler;
+import com.itways.assistant.journey.engine.service.StepTextPort;
 import com.itways.assistant.journey.engine.service.StepObserver;
 import com.itways.assistant.journey.engine.service.StepHandlerRegistry;
 import com.itways.assistant.journey.engine.util.EngineUtils;
@@ -29,15 +34,25 @@ public class JourneyEngineImpl implements JourneyEngine {
     private final VariableContext variableContext;
     private final ObjectMapper objectMapper;
     private final List<JourneyRunLifecyclePort> lifecyclePorts;
+    private final EngineMessages engineMessages;
+    private final StepLocalizer stepLocalizer;
+    private final StepTextPort stepTextPort;
 
     public JourneyEngineImpl(StepHandlerRegistry handlerRegistry, EngineUtils engineUtils,
                              VariableContext variableContext, ObjectMapper objectMapper,
-                             List<JourneyRunLifecyclePort> lifecyclePorts) {
+                             List<JourneyRunLifecyclePort> lifecyclePorts, EngineMessages engineMessages,
+                             StepLocalizer stepLocalizer,
+                             org.springframework.beans.factory.ObjectProvider<StepTextPort> stepTextPort) {
         this.handlerRegistry = handlerRegistry;
         this.engineUtils = engineUtils;
         this.variableContext = variableContext;
         this.objectMapper = objectMapper;
         this.lifecyclePorts = lifecyclePorts != null ? lifecyclePorts : List.of();
+        this.engineMessages = engineMessages;
+        this.stepLocalizer = stepLocalizer;
+        // Optional: an application embedding the engine without a translation store
+        // still runs, it just never localizes authored text.
+        this.stepTextPort = stepTextPort.getIfAvailable(() -> StepTextPort.NONE);
     }
 
     @Override
@@ -82,6 +97,10 @@ public class JourneyEngineImpl implements JourneyEngine {
         // engine internals before any step runs, so it never reaches run history,
         // the variable picker, CODE_SCRIPT or DATA_MAP's prompt.
         EndUserAuth.lift(context, params);
+
+        // The conversation language arrives the same way, and must be on the
+        // context before seedRuntime publishes {{runtime.language}} from it.
+        LanguageParams.lift(context, params);
 
         // The trigger stack arrives as a start-param (the only channel into a child
         // run); lift it out of the author-visible variable map into engine internals.
@@ -171,6 +190,7 @@ public class JourneyEngineImpl implements JourneyEngine {
         // JWT lives ~10 minutes), so a resumed run must adopt the new one rather than
         // keep the value captured when the journey started.
         EndUserAuth.lift(context, pending);
+        LanguageParams.lift(context, pending);
         context.setInternal(TriggerJourneyStepHandler.PENDING_RESUME_INPUT, pending);
         context.setStatus(ExecutionStatus.RUNNING);
         // Ensure lineage fields are present after deserialization.
@@ -197,8 +217,42 @@ public class JourneyEngineImpl implements JourneyEngine {
                 context.getJourneyId() != null ? context.getJourneyId() : journey.getId());
         variableContext.writeRuntime(context, "journeyName", journey.getName());
         variableContext.writeRuntime(context, "triggerIntent", journey.getTriggerIntent());
+        // Journey authors branch on these with a plain CONDITION or SWITCH step,
+        // which is what makes a bilingual flow expressible without a new step type.
+        variableContext.writeRuntime(context, "language", context.resolvedLanguage().code());
+        variableContext.writeRuntime(context, "languageName", context.resolvedLanguage().englishName());
+        variableContext.writeRuntime(context, "direction", context.resolvedLanguage().direction().toString());
         if (context.getStartedAt() != null) {
             variableContext.writeRuntime(context, "startedAt", context.getStartedAt().toInstant().toString());
+        }
+    }
+
+    /**
+     * This journey's translated text for the run's language, or an empty map.
+     *
+     * <p>
+     * Skipped entirely when the run is in the language the journey was authored
+     * in, which is the common case and the one that must stay free.
+     *
+     * <p>
+     * Never propagates a failure: a translation store that is down leaves the
+     * conversation in the authored language, which is exactly how the platform
+     * behaved before translations existed. Failing the run instead would turn a
+     * cosmetic outage into a total one.
+     */
+    private Map<Long, StepText> loadTranslations(Journey journey, ExecutionContext context) {
+        Long journeyId = context.getJourneyId() != null ? context.getJourneyId() : journey.getId();
+        if (journeyId == null || stepTextPort == null) {
+            return Map.of();
+        }
+        try {
+            Map<Long, StepText> found = stepTextPort.forJourney(context.getAccountId(), journeyId,
+                    context.resolvedLanguage());
+            return found != null ? found : Map.of();
+        } catch (Exception e) {
+            log.warn("Step translations unavailable for journey {} in {}; using authored text: {}",
+                    journeyId, context.resolvedLanguage().code(), e.getMessage());
+            return Map.of();
         }
     }
 
@@ -220,7 +274,7 @@ public class JourneyEngineImpl implements JourneyEngine {
         if (steps == null || steps.isEmpty()) {
             log.warn("Journey '{}' has no steps defined.", journey.getTriggerIntent());
             result.put("status", "FINISHED");
-            result.put("message", "This journey has no steps configured.");
+            result.put("message", engineMessages.get(context.resolvedLanguage(), "run.noSteps"));
             result.put("context", context);
             result.put("stepResults", stepResults);
             return result;
@@ -241,8 +295,18 @@ public class JourneyEngineImpl implements JourneyEngine {
         }
 
         int i = 0;
+        // One lookup for the whole run rather than one per step: a run touches most
+        // of its steps, and a per-step call would put a round trip inside the loop.
+        // Re-read on every turn, not cached on the context, because a resumed run
+        // may have switched language since the turn that parked it.
+        Map<Long, StepText> translations = loadTranslations(journey, context);
+
         while (i < sortedSteps.size() && context.getStatus() == ExecutionStatus.RUNNING) {
-            JourneyStep step = sortedSteps.get(i);
+            JourneyStep authored = sortedSteps.get(i);
+            // Everything below this line works on the localized copy, so no handler
+            // needs to know translations exist.
+            JourneyStep step = stepLocalizer.localize(authored, translations, context.getAccountId(),
+                    context.resolvedLanguage());
             int stepOrder = step.getStepOrder();
             int startIndex = context.getCurrentStepIndex();
 
@@ -353,7 +417,12 @@ public class JourneyEngineImpl implements JourneyEngine {
                 i = 0;
                 continue;
             } else {
-                viewResult.put("message", stepResult.getMessage());
+                viewResult.put("message", stepResult.userFacingMessage());
+                if (stepResult.getUserMessage() != null) {
+                    // Keep the diagnostic reachable for run history and support,
+                    // just not as the thing the customer reads.
+                    viewResult.put("detail", stepResult.getMessage());
+                }
                 mergeStepMetadata(viewResult, metadata);
                 stepResults.add(viewResult);
                 publish(observer, viewResult);
@@ -390,10 +459,23 @@ public class JourneyEngineImpl implements JourneyEngine {
         if ("ERROR".equals(finalStatus)) {
             for (int idx = stepResults.size() - 1; idx >= 0; idx--) {
                 Map<String, Object> r = stepResults.get(idx);
-                if ("ERROR".equals(r.get("status")) && r.get("message") != null) {
-                    result.put("message", r.get("message"));
-                    break;
+                if (!"ERROR".equals(r.get("status")) || r.get("message") == null) {
+                    continue;
                 }
+                // A step that supplied a user-facing message put it in "message" and
+                // its diagnostic in "detail" -- HUMAN_APPROVAL's rejection being the
+                // case that matters, where the stopping reason genuinely is the most
+                // useful thing to say.
+                //
+                // Everything else failed on configuration, and its message reads like
+                // "TEMPLATE_RENDER: '{{id}}' is not a template id": exactly what an
+                // operator needs in run history and exactly what a customer must
+                // never be shown. It is also half identifier and so untranslatable.
+                // The step log keeps it either way; the reply gets a sentence.
+                result.put("message", r.containsKey("detail")
+                        ? r.get("message")
+                        : engineMessages.get(context.resolvedLanguage(), "run.error.generic"));
+                break;
             }
         }
         if (result.get("message") == null) {

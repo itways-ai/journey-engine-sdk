@@ -19,10 +19,18 @@ public interface KnowledgeBasePort {
      * @param indexName  the named knowledge base to search (e.g. "products", "faq")
      * @param queryVector the embedding vector of the user's query
      * @param limit      maximum number of results to return
+     * @param locale     the conversation's language, or null for no preference.
+     *                   When the index holds chunks in this locale, only those
+     *                   are searched; when it holds none, the whole index is
+     *                   searched and answers may come back in another language.
+     *                   Restricting to a locale that exists is what stops a
+     *                   near-duplicate English chunk outscoring the correct
+     *                   Arabic one on a cross-lingual embedding
      * @return list of matching text chunks ordered by similarity (most similar first)
      */
     List<EngineSearchResult> search(String accountId,
                                     String indexName,
                                     float[] queryVector,
-                                    int limit);
+                                    int limit,
+                                    String locale);
 }

@@ -1,5 +1,8 @@
 package com.itways.assistant.journey.engine.handler;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -17,6 +20,9 @@ import lombok.extern.slf4j.Slf4j;
 @Component
 @RequiredArgsConstructor
 public class RedirectStepHandler implements StepHandler {
+
+    /** Step-view key the Web SDK reads to navigate the host page. */
+    public static final String META_REDIRECT_URL = "redirectUrl";
 
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
@@ -49,11 +55,20 @@ public class RedirectStepHandler implements StepHandler {
             successMessage = engineUtils.replacePlaceholders(step.getMessage(), context.getVariables());
         }
 
+        // The URL also travels in metadata, which is the only channel that
+        // actually reaches the browser: JourneyEngineImpl merges a step's
+        // metadata into the client-facing view but never copies StepResult's
+        // own actionTarget field, so a client had no way to tell a REDIRECT
+        // apart from any other step that happens to output a string.
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put(META_REDIRECT_URL, resolvedUrl);
+
         return StepResult.builder()
                 .status("SUCCESS")
                 .data(resolvedUrl)
                 .message(successMessage)
                 .actionTarget(resolvedUrl)
+                .metadata(metadata)
                 .build();
     }
 }

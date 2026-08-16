@@ -2,9 +2,12 @@ package com.itways.assistant.journey.engine.handler;
 
 import com.itways.assistant.ai.service.impl.LocalEmbeddingEngine;
 import com.itways.assistant.journey.engine.context.VariableContext;
+import com.itways.assistant.journey.engine.language.ConversationLanguage;
+import com.itways.assistant.journey.engine.language.EngineMessages;
 import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.KnowledgeBasePort;
 import com.itways.assistant.journey.engine.service.StepHandler;
+import com.itways.assistant.journey.engine.service.TextTranslator;
 import com.itways.assistant.journey.engine.util.EngineUtils;
 import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 import lombok.RequiredArgsConstructor;
@@ -29,6 +32,8 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
     private final StepOutputSchemaHelper schemaHelper;
     private final LocalEmbeddingEngine embeddingEngine;
     private final KnowledgeBasePort  knowledgeBasePort;
+    private final EngineMessages messages;
+    private final TextTranslator translator;
 
     @Override
     public String getType() {
@@ -77,10 +82,13 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             float[] queryVector = embeddingEngine.embed(query);
 
             // Vector search via port (implemented in journey-service)
+            // Locale-scoped when the index has content in this language. Without it a
+            // near-duplicate English chunk can outscore the correct Arabic one, since
+            // the embedding space is shared across languages.
             List<EngineSearchResult> results = knowledgeBasePort.search(
-                    accountId, indexName, queryVector, limit);
+                    accountId, indexName, queryVector, limit, context.resolvedLanguage().code());
 
-            String fallbackMsg = "I don't have information about this.";
+            String fallbackMsg = messages.get(context.resolvedLanguage(), "step.knowledge.noAnswer");
 
             if (results.isEmpty()) {
                 log.warn("⚠️ Database query returned 0 rows for index: '{}'", indexName);
@@ -111,7 +119,7 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             // GUARD 2: The "Sure Match" Bypass (For exact Arabic-to-Arabic matches)
             if(bestScore >= SURE_MATCH_THRESHOLD){
                 log.info("🌟 Sure Match bypassed gap check! Score: {}", bestScore);
-                String cleanAnswerText = bestMatch.answer();
+                String cleanAnswerText = answerInRunLanguage(bestMatch, context);
                 storeKnowledgeOutput(step, context, cleanAnswerText, true);
                 return StepResult.success(cleanAnswerText, step.getMessage());
             }
@@ -125,12 +133,12 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             // GUARD 3: The "Soft Match" / Cross-Lingual Zone
             if(actualGap < MIN_RELATIVE_GAP) {
                 log.warn("⚠️ Ambiguous cluster detected (Gap {} < {}). Returning best scored answer.", actualGap, MIN_RELATIVE_GAP);
-                String cleanAnswerText = bestMatch.answer();
+                String cleanAnswerText = answerInRunLanguage(bestMatch, context);
                 storeKnowledgeOutput(step, context, cleanAnswerText, true);
                 return StepResult.success(cleanAnswerText, step.getMessage());
             }
 
-            String cleanAnswerText = bestMatch.answer();
+            String cleanAnswerText = answerInRunLanguage(bestMatch, context);
             storeKnowledgeOutput(step, context, cleanAnswerText, true);
 
             log.info("✅ Knowledge Retrieval complete (Direct Answer).");
@@ -140,6 +148,42 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             log.error("❌ Knowledge Retrieval failed", e);
             return StepResult.error("Knowledge Retrieval failed: " + e.getMessage());
         }
+    }
+
+    /**
+     * The matched answer, translated if it is stored in another language.
+     *
+     * <p>
+     * Only reached when the index had nothing in the run's language -- the search
+     * itself prefers matching-locale chunks, so a properly tagged bilingual
+     * corpus never gets here and never pays for a translation.
+     *
+     * <p>
+     * An untagged chunk (null locale) is returned as stored. Guessing its
+     * language and translating on that guess risks mangling an answer that was
+     * already correct, and untagged corpora are the ones most likely to be mixed.
+     */
+    private String answerInRunLanguage(EngineSearchResult match, ExecutionContext context) {
+        String answer = match.answer();
+        ConversationLanguage stored = ConversationLanguage.parse(match.locale());
+        ConversationLanguage target = context.resolvedLanguage();
+
+        if (answer == null || answer.isBlank() || stored == null || stored == target) {
+            return answer;
+        }
+
+        try {
+            String translated = translator.translate(context.getAccountId(), answer, stored, target);
+            if (translated != null && !translated.isBlank()) {
+                log.info("Translated knowledge answer from {} to {}", stored.code(), target.code());
+                return translated;
+            }
+        } catch (Exception e) {
+            log.warn("Could not translate knowledge answer: {}", e.getMessage());
+        }
+
+        // A correct answer in the wrong language beats no answer at all.
+        return answer;
     }
 
     private StepResult triggerFallback(JourneyStep step, ExecutionContext context, String fallbackMsg) {

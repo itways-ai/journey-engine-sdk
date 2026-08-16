@@ -6,6 +6,7 @@ import java.util.Map;
 import org.springframework.stereotype.Component;
 
 import com.itways.assistant.journey.engine.context.VariableContext;
+import com.itways.assistant.journey.engine.language.EngineMessages;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.ExecutionStatus;
@@ -29,6 +30,7 @@ public class UserInputStepHandler implements StepHandler {
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
+    private final EngineMessages messages;
 
     @Override
     public String getType() {
@@ -71,7 +73,7 @@ public class UserInputStepHandler implements StepHandler {
                 metadata.put("subStatus", "CONFIRMATION_REQUIRED");
                 metadata.put("parsedData", answer);
                 return StepResult.waiting(
-                        "I've analyzed your input. Please verify the details below to ensure neural accuracy.",
+                        messages.get(context.resolvedLanguage(), "step.userInput.confirm"),
                         metadata);
             }
 
@@ -92,7 +94,7 @@ public class UserInputStepHandler implements StepHandler {
 
         String prompt = (step.getMessage() != null && !step.getMessage().isEmpty())
                 ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
-                : "Waiting for input: " + step.getStepName();
+                : messages.get(context.resolvedLanguage(), "step.userInput.waiting", step.getStepName());
 
         return StepResult.waiting(prompt, metadata);
     }

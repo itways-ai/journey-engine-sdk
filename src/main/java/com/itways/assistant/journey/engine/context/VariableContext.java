@@ -1,5 +1,6 @@
 package com.itways.assistant.journey.engine.context;
 
+import com.itways.assistant.journey.engine.language.LanguageParams;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.JourneyStep;
 import com.itways.assistant.journey.engine.util.Placeholders;
@@ -14,7 +15,10 @@ import java.util.Set;
 public class VariableContext {
 
     private static final Set<String> RESERVED_KEYS = Set.of(
-            "text", "files", "entities", "answer", "forceIntent", "channel");
+            "text", "files", "entities", "answer", "forceIntent", "channel",
+            // Lifted onto the context by LanguageParams; an entities copy would
+            // look authoritative to an author while changing nothing.
+            LanguageParams.PARAM_LANGUAGE);
 
     public void ensureStructure(ExecutionContext context) {
         Map<String, Object> vars = context.getVariables();

@@ -3,12 +3,15 @@ package com.itways.assistant.journey.engine.handler;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
 import org.springframework.stereotype.Component;
 
 import com.itways.assistant.journey.engine.context.VariableContext;
+import com.itways.assistant.journey.engine.language.ConversationLanguage;
+import com.itways.assistant.journey.engine.language.EngineMessages;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.ExecutionStatus;
@@ -35,24 +38,58 @@ public class HumanApprovalStepHandler implements StepHandler {
     private static final int DEFAULT_TIMEOUT_HOURS = 24;
 
     /**
-     * Answers that count as a decision. Anything outside these sets is treated as
-     * an unclear reply and re-prompted: this step used to accept <em>any</em>
-     * non-null answer as approval, so "no" granted the approval it was refusing.
-     * Both languages the product ships in are covered.
+     * Answers that count as a decision, pooled across every supported language.
+     *
+     * <p>
+     * Anything outside these sets is treated as an unclear reply and re-prompted:
+     * this step used to accept <em>any</em> non-null answer as approval, so "no"
+     * granted the approval it was refusing.
+     *
+     * <p>
+     * Pooled rather than filtered by the conversation's language on purpose. People
+     * answer a prompt in whatever is fastest to type; "ok" lands in Arabic threads
+     * constantly, and refusing it because the conversation is in Arabic would be a
+     * regression dressed up as correctness. Sourcing the words from the bundles means
+     * a new language brings its own vocabulary with its translation file and nothing
+     * here changes.
      */
-    private static final Set<String> APPROVE = Set.of(
-            "yes", "y", "ok", "okay", "approve", "approved", "confirm", "confirmed",
-            "agree", "agreed", "accept", "accepted", "grant", "granted", "sure", "true",
-            "نعم", "موافق", "أوافق", "اوافق", "تم", "قبول", "مقبول");
-
-    private static final Set<String> REJECT = Set.of(
-            "no", "n", "nope", "reject", "rejected", "deny", "denied", "decline",
-            "declined", "disagree", "refuse", "refused", "cancel", "cancelled", "false",
-            "لا", "رفض", "أرفض", "ارفض", "مرفوض", "غير موافق");
+    private final Set<String> approveWords = new HashSet<>();
+    private final Set<String> rejectWords = new HashSet<>();
 
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
+    private final EngineMessages messages;
+
+    @jakarta.annotation.PostConstruct
+    void loadDecisionVocabulary() {
+        for (ConversationLanguage language : ConversationLanguage.values()) {
+            collectInto(approveWords, messages.get(language, "step.approval.approveWords"));
+            collectInto(rejectWords, messages.get(language, "step.approval.rejectWords"));
+        }
+        // A word claimed by both lists is a translation bug, and silently letting
+        // APPROVE win would mean a refusal performing the action it refused.
+        Set<String> ambiguous = new HashSet<>(approveWords);
+        ambiguous.retainAll(rejectWords);
+        if (!ambiguous.isEmpty()) {
+            log.error("HUMAN_APPROVAL: {} appear as both approval and rejection; treating them as unclear",
+                    ambiguous);
+            approveWords.removeAll(ambiguous);
+            rejectWords.removeAll(ambiguous);
+        }
+    }
+
+    private static void collectInto(Set<String> target, String commaSeparated) {
+        if (commaSeparated == null || commaSeparated.isBlank()) {
+            return;
+        }
+        for (String word : commaSeparated.split(",")) {
+            String trimmed = word.trim().toLowerCase();
+            if (!trimmed.isEmpty()) {
+                target.add(trimmed);
+            }
+        }
+    }
 
     @Override
     public String getType() {
@@ -84,7 +121,7 @@ public class HumanApprovalStepHandler implements StepHandler {
                 // Consumed but unusable. Ask again rather than guessing, and leave the
                 // deadline running so an endless stream of unclear replies still expires.
                 return awaitDecision(step, context, config, deadlineKey,
-                        "I could not tell whether that was an approval. Please reply with approve or reject.");
+                        messages.get(context.resolvedLanguage(), "step.approval.unclear"));
             }
 
             context.removeInternal(deadlineKey);
@@ -92,7 +129,8 @@ public class HumanApprovalStepHandler implements StepHandler {
             log.info("HUMAN_APPROVAL step '{}' resolved: {}", step.getStepName(), decision ? "APPROVED" : "REJECTED");
 
             if (decision) {
-                return StepResult.success(Boolean.TRUE, "Human approval granted.");
+                return StepResult.success(Boolean.TRUE,
+                        messages.get(context.resolvedLanguage(), "step.approval.granted"));
             }
             // A refusal must stop the run. Returning success here let the engine
             // walk straight into the step the gate was protecting, so answering
@@ -102,7 +140,8 @@ public class HumanApprovalStepHandler implements StepHandler {
             // The decision is still stored as this step's output before we return,
             // so a journey that wants an explicit rejection path can branch on it;
             // the default, though, is now to halt.
-            return StepResult.error("Human approval rejected.");
+            return StepResult.error("Human approval rejected.",
+                    messages.get(context.resolvedLanguage(), "step.approval.rejected"));
         }
 
         // No answer this pass. An elapsed deadline auto-rejects: nothing should be
@@ -116,7 +155,8 @@ public class HumanApprovalStepHandler implements StepHandler {
                     step.getStepName(), deadline);
             // Same reasoning as an explicit refusal: an expired gate must not let
             // the protected step run. Nothing is approved by inaction.
-            return StepResult.error("Human approval timed out and was automatically rejected.");
+            return StepResult.error("Human approval timed out and was automatically rejected.",
+                    messages.get(context.resolvedLanguage(), "step.approval.timedOut"));
         }
 
         return awaitDecision(step, context, config, deadlineKey, null);
@@ -156,24 +196,24 @@ public class HumanApprovalStepHandler implements StepHandler {
         if (prompt == null) {
             prompt = (step.getMessage() != null && !step.getMessage().isEmpty())
                     ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
-                    : defaultPrompt(stakeholderMode, stakeholders);
+                    : defaultPrompt(context, stakeholderMode, stakeholders);
         }
 
         return StepResult.waiting(prompt, metadata);
     }
 
-    private static String defaultPrompt(boolean stakeholderMode, String stakeholders) {
+    private String defaultPrompt(ExecutionContext context, boolean stakeholderMode, String stakeholders) {
         if (stakeholderMode && stakeholders != null && !stakeholders.isBlank()) {
-            return "Awaiting approval from: " + stakeholders + ". Reply approve or reject.";
+            return messages.get(context.resolvedLanguage(), "step.approval.promptStakeholder", stakeholders);
         }
-        return "Please confirm to continue. Reply approve or reject.";
+        return messages.get(context.resolvedLanguage(), "step.approval.prompt");
     }
 
     /**
      * Maps an answer onto a decision, or null when it is neither. Booleans arrive
      * from structured form replies; everything else is free text from a channel.
      */
-    private static Boolean interpret(Object answer) {
+    private Boolean interpret(Object answer) {
         if (answer instanceof Boolean bool) {
             return bool;
         }
@@ -183,10 +223,10 @@ public class HumanApprovalStepHandler implements StepHandler {
         if (normalized.isEmpty()) {
             return null;
         }
-        if (APPROVE.contains(normalized)) {
+        if (approveWords.contains(normalized)) {
             return Boolean.TRUE;
         }
-        if (REJECT.contains(normalized)) {
+        if (rejectWords.contains(normalized)) {
             return Boolean.FALSE;
         }
         return null;
