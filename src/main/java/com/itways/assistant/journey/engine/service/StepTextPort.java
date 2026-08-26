@@ -10,7 +10,7 @@ import com.itways.assistant.journey.engine.language.StepText;
  *
  * <p>
  * A port because the engine has no database: journey-service owns
- * {@code journey_step_translations}, and speech-service wires the two together.
+ * {@code journey_step_translations}, and assistant-service wires the two together.
  * Same shape as {@link KnowledgeBasePort} and {@link TemplateRenderPort}.
  *
  * <p>

@@ -5,7 +5,7 @@ import com.itways.assistant.ai.dto.AiRequestConfig;
 public interface AiConfigProvider {
     /**
      * Resolves the AI configuration based on the current context.
-     * The implementation (in speech-service) will handle the account lookup.
+     * The implementation (in assistant-service) will handle the account lookup.
      */
 
     AiRequestConfig getConfig(String accountId);

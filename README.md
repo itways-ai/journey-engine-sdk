@@ -106,7 +106,7 @@ get its dependency.
 | `MailDeliveryPort` | `SEND_MAIL` | Deliver mail with per-step SMTP settings |
 | `TemplateRenderPort` | `TEMPLATE_RENDER` | Render a stored template |
 
-In this platform all five are implemented by **speech-service**, which is where the engine runs.
+In this platform all five are implemented by **assistant-service**, which is where the engine runs.
 
 ## 🛠 Extending the Engine
 
