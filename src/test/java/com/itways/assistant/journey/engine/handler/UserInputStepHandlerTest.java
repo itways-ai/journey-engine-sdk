@@ -1,0 +1,200 @@
+package com.itways.assistant.journey.engine.handler;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.itways.assistant.journey.engine.context.VariableContext;
+import com.itways.assistant.journey.engine.language.ConversationLanguage;
+import com.itways.assistant.journey.engine.language.EngineMessages;
+import com.itways.assistant.journey.engine.model.ExecutionContext;
+import com.itways.assistant.journey.engine.model.ExecutionStatus;
+import com.itways.assistant.journey.engine.model.JourneyStep;
+import com.itways.assistant.journey.engine.model.StepResult;
+import com.itways.assistant.journey.engine.util.EngineUtils;
+import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * USER_INPUT is the step that parks a run on the user, so what it publishes
+ * while waiting is a client-facing contract: the prompt, the form metadata and
+ * the resubmit flag are what every channel renders. The other contract pinned
+ * here is INTERACTIVE's one-shot confirmation loop — its awaiting marker is
+ * what makes the second pass count as the confirmation; without it a
+ * plain-text reply (every channel user) re-triggered the prompt forever.
+ */
+@DisplayName("UserInputStepHandler")
+class UserInputStepHandlerTest {
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final VariableContext variableContext = new VariableContext();
+    private final EngineMessages messages = new EngineMessages();
+    private final UserInputStepHandler handler = new UserInputStepHandler(
+            new EngineUtils(objectMapper), variableContext,
+            new StepOutputSchemaHelper(objectMapper), messages);
+
+    private ExecutionContext context() {
+        ExecutionContext context = ExecutionContext.builder()
+                .variables(new HashMap<>()).status(ExecutionStatus.RUNNING).build();
+        variableContext.ensureStructure(context);
+        variableContext.mergeInputs(context, Map.of("name", "Sarah"));
+        return context;
+    }
+
+    private ExecutionContext contextWithAnswer(Object answer) {
+        ExecutionContext context = context();
+        variableContext.getInputs(context).put("answer", answer);
+        return context;
+    }
+
+    private static JourneyStep step(String message, String apiConfig) {
+        return JourneyStep.builder()
+                .stepOrder(4).stepName("Collect colour").actionType("USER_INPUT")
+                .message(message).apiConfig(apiConfig).build();
+    }
+
+    @Nested
+    @DisplayName("asking for input")
+    class Asking {
+
+        @Test
+        @DisplayName("with no answer, the step parks the run with the interpolated authored prompt")
+        void parksWithAuthoredPrompt() {
+            ExecutionContext context = context();
+
+            StepResult result = handler.execute(
+                    step("What colour, {{inputs.entities.name}}?", null), context);
+
+            assertThat(result.getStatus()).isEqualTo("WAITING");
+            assertThat(result.getMessage()).isEqualTo("What colour, Sarah?");
+            assertThat(context.getStatus()).isEqualTo(ExecutionStatus.WAITING_FOR_INPUT);
+        }
+
+        @Test
+        @DisplayName("publishes the form contract the client renders while waiting")
+        void publishesFormMetadata() {
+            StepResult result = handler.execute(step("Pick one", null), context());
+
+            assertThat(result.getMetadata())
+                    .containsEntry("stepName", "Collect colour")
+                    .containsEntry("inputMode", "FREE_TEXT")
+                    .containsEntry("allowResubmit", false)
+                    .containsKey("formConfig")
+                    // FREE_TEXT is the plain prompt; no form sub-status.
+                    .doesNotContainKey("subStatus");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> formConfig = (Map<String, Object>) result.getMetadata().get("formConfig");
+            assertThat(formConfig).containsOnlyKeys("fields", "rules");
+        }
+
+        @Test
+        @DisplayName("with no authored prompt, the engine speaks for the step in the run's language")
+        void fallsBackToEnginePrompt() {
+            StepResult result = handler.execute(step(null, null), context());
+
+            assertThat(result.getMessage()).isEqualTo(
+                    messages.get(ConversationLanguage.ENGLISH, "step.userInput.waiting", "Collect colour"));
+        }
+
+        @Test
+        @DisplayName("STRUCTURED mode announces a direct form and carries the authored fields")
+        void structuredModeOpensDirectForm() {
+            StepResult result = handler.execute(step("Fill this in",
+                    "{\"inputMode\":\"STRUCTURED\",\"allowResubmit\":true,"
+                            + "\"fields\":[{\"name\":\"colour\"}]}"), context());
+
+            assertThat(result.getStatus()).isEqualTo("WAITING");
+            assertThat(result.getMetadata())
+                    .containsEntry("subStatus", "DIRECT_FORM")
+                    .containsEntry("inputMode", "STRUCTURED")
+                    .containsEntry("allowResubmit", true);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> formConfig = (Map<String, Object>) result.getMetadata().get("formConfig");
+            assertThat(formConfig.get("fields")).asString().contains("colour");
+        }
+    }
+
+    @Nested
+    @DisplayName("receiving an answer")
+    class Answering {
+
+        @Test
+        @DisplayName("consumes the answer exactly once and stores it as the step's output")
+        void consumesAnswerAndStoresOutput() {
+            ExecutionContext context = contextWithAnswer("blue");
+
+            StepResult result = handler.execute(step("Thanks {{inputs.entities.name}}", null), context);
+
+            assertThat(result.getStatus()).isEqualTo("SUCCESS");
+            assertThat(result.getData()).isEqualTo("blue");
+            assertThat(result.getMessage()).isEqualTo("Thanks Sarah");
+            assertThat(variableContext.read(context, "steps.4.output")).isEqualTo("blue");
+            // The answer must be consumed — leaving it in inputs would make the
+            // next USER_INPUT step in the journey swallow it as its own.
+            assertThat(variableContext.getInputs(context)).doesNotContainKey("answer");
+        }
+    }
+
+    @Nested
+    @DisplayName("INTERACTIVE confirmation loop")
+    class Interactive {
+
+        private static final String CONFIG = "{\"inputMode\":\"INTERACTIVE\"}";
+
+        @Test
+        @DisplayName("a free-text answer is parsed back to the user once for confirmation")
+        void firstPassAsksForConfirmation() {
+            ExecutionContext context = contextWithAnswer("blue dress, size M");
+
+            StepResult result = handler.execute(step(null, CONFIG), context);
+
+            assertThat(result.getStatus()).isEqualTo("WAITING");
+            assertThat(context.getStatus()).isEqualTo(ExecutionStatus.WAITING_FOR_INPUT);
+            assertThat(result.getMessage()).isEqualTo(
+                    messages.get(ConversationLanguage.ENGLISH, "step.userInput.confirm"));
+            assertThat(result.getMetadata())
+                    .containsEntry("subStatus", "CONFIRMATION_REQUIRED")
+                    .containsEntry("parsedData", "blue dress, size M");
+            // The marker is the whole mechanism: it is what makes the next pass
+            // count as the confirmation instead of a brand-new answer.
+            assertThat(context.getInternal(UserInputStepHandler.AWAITING_CONFIRM_PREFIX + 4))
+                    .isEqualTo(true);
+            assertThat(variableContext.getInputs(context)).doesNotContainKey("answer");
+        }
+
+        @Test
+        @DisplayName("the second pass counts as the confirmation and clears the marker")
+        void secondPassConfirms() {
+            ExecutionContext context = contextWithAnswer("yes");
+            context.setInternal(UserInputStepHandler.AWAITING_CONFIRM_PREFIX + 4, true);
+
+            StepResult result = handler.execute(step(null, CONFIG), context);
+
+            assertThat(result.getStatus()).isEqualTo("SUCCESS");
+            // A stale marker would turn every later pass through this step into
+            // a silent auto-confirm.
+            assertThat(context.getInternal(UserInputStepHandler.AWAITING_CONFIRM_PREFIX + 4)).isNull();
+            // NOTE: possible defect — the confirmation reply overwrites the
+            // parsed first-pass answer: steps.4.output is now "yes", not the
+            // data the user was asked to confirm. Pinned as current behavior.
+            assertThat(result.getData()).isEqualTo("yes");
+            assertThat(variableContext.read(context, "steps.4.output")).isEqualTo("yes");
+        }
+
+        @Test
+        @DisplayName("a structured answer skips confirmation — it was not free text needing verification")
+        void structuredAnswerSkipsConfirmation() {
+            ExecutionContext context = contextWithAnswer(Map.of("colour", "blue"));
+
+            StepResult result = handler.execute(step(null, CONFIG), context);
+
+            assertThat(result.getStatus()).isEqualTo("SUCCESS");
+            assertThat(result.getData()).isEqualTo(Map.of("colour", "blue"));
+            assertThat(context.getInternal(UserInputStepHandler.AWAITING_CONFIRM_PREFIX + 4)).isNull();
+        }
+    }
+}

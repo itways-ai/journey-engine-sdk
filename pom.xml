@@ -98,6 +98,37 @@
                     </execution>
                 </executions>
             </plugin>
+            <!--
+                Without this, Maven falls back to the super-POM's surefire
+                2.12.4, which predates JUnit 5: the tests compile, "Tests run: 0"
+                is reported, and the build goes green having executed nothing.
+                The Spring Boot services inherit a modern surefire from their
+                parent; this library has no parent.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.13</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 
