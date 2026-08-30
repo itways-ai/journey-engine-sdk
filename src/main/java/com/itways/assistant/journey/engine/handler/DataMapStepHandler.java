@@ -68,7 +68,7 @@ public class DataMapStepHandler implements StepHandler {
 
 			Map<String, Object> model = new HashMap<>();
 			model.put("userText", text);
-			model.put("executionContext", objectMapper.writeValueAsString(context.getVariables()));
+			model.put("executionContext", boundedContext(context.getVariables(), step));
 			model.put("jsonTemplate", action);
 			model.put("instructions", step.getRequiredParams());
 
@@ -91,6 +91,17 @@ public class DataMapStepHandler implements StepHandler {
 			// Strip markdown code blocks if present (AI often returns ```json ... ```)
 			String cleanedContent = stripMarkdownCodeBlocks(nlpResult.getContent());
 
+			// A failed provider call is not an exception here: the agents return
+			// the error text as ordinary content, so a 413 or a missing key
+			// arrives looking like an answer. Left alone it surfaces as a Jackson
+			// parse error in run history, which tells an operator nothing about
+			// the rate limit that actually caused it.
+			if (looksLikeProviderError(cleanedContent)) {
+				log.error("DATA_MAP step '{}' got a provider error instead of JSON: {}",
+						step.getStepName(), cleanedContent);
+				return StepResult.error("Data Mapping Failed: " + cleanedContent);
+			}
+
 			Object mappedData = objectMapper.readValue(cleanedContent, Object.class);
 
 			if (mappedData instanceof Map) {
@@ -104,6 +115,109 @@ public class DataMapStepHandler implements StepHandler {
 			return StepResult.success(mappedData, step.getMessage());
 		} catch (Exception e) {
 			return StepResult.error("Data Mapping Failed: " + e.getMessage());
+		}
+	}
+
+	/**
+	 * How much of the run's variables may be quoted into the prompt.
+	 *
+	 * <p>
+	 * Characters rather than tokens because the engine has no tokenizer and the
+	 * ratio is provider-specific; roughly four characters to a token is close
+	 * enough for a safety bound.
+	 */
+	@org.springframework.beans.factory.annotation.Value("${nibras.journey.data-map.context-budget-chars:8000}")
+	private int contextBudgetChars = 8000;
+
+	/**
+	 * The execution context, trimmed to something a provider will accept.
+	 *
+	 * <p>
+	 * This step used to serialize the entire variable map into every prompt. On
+	 * a journey that had just fetched a project's whole task list, that blob ran
+	 * past the provider's per-minute token limit and the call came back 413 — and
+	 * because a failed call is returned as an ordinary response carrying the
+	 * error text, and these steps are authored {@code continueOnError}, the run
+	 * carried on and delivered an empty message with nothing in run history to
+	 * explain it. Two demo journeys failed this way for weeks.
+	 *
+	 * <p>
+	 * Over budget, the reserved buckets an author is most likely to reference by
+	 * name are kept whole and step outputs are dropped oldest-first — a DATA_MAP
+	 * almost always summarises what the steps just before it produced. What was
+	 * dropped is named in the prompt rather than silently omitted, so the model
+	 * does not confidently answer from a context it cannot see.
+	 */
+	String boundedContext(Map<String, Object> variables, JourneyStep step) throws Exception {
+		String full = objectMapper.writeValueAsString(variables);
+		if (full.length() <= contextBudgetChars) {
+			return full;
+		}
+
+		Map<String, Object> trimmed = new HashMap<>(variables);
+		Object rawSteps = variables.get("steps");
+		List<String> dropped = new java.util.ArrayList<>();
+
+		if (rawSteps instanceof Map<?, ?> stepsMap) {
+			// Step keys are orders; keep the newest and shed the rest until the
+			// whole thing fits.
+			List<String> byOldestFirst = stepsMap.keySet().stream()
+					.map(String::valueOf)
+					.sorted(java.util.Comparator.comparingInt(DataMapStepHandler::orderOf))
+					.collect(java.util.stream.Collectors.toCollection(java.util.ArrayList::new));
+
+			Map<String, Object> keptSteps = new java.util.LinkedHashMap<>();
+			for (Object key : stepsMap.keySet()) {
+				keptSteps.put(String.valueOf(key), stepsMap.get(key));
+			}
+			for (String oldest : byOldestFirst) {
+				if (objectMapper.writeValueAsString(trimmed).length() <= contextBudgetChars
+						|| keptSteps.size() <= 1) {
+					break;
+				}
+				keptSteps.remove(oldest);
+				dropped.add(oldest);
+				trimmed.put("steps", keptSteps);
+			}
+			trimmed.put("steps", keptSteps);
+		}
+
+		String result = objectMapper.writeValueAsString(trimmed);
+		log.warn("DATA_MAP step '{}' context trimmed from {} to {} chars; dropped step outputs {}",
+				step.getStepName(), full.length(), result.length(), dropped);
+		if (!dropped.isEmpty()) {
+			// Named, not silently omitted: a model told nothing is missing will
+			// answer as though nothing is.
+			result = result + "\n/* Older step outputs were omitted to fit: steps "
+					+ String.join(", ", dropped) + ". */";
+		}
+		return result;
+	}
+
+	/**
+	 * Whether a response is a provider failure wearing an answer's clothes.
+	 *
+	 * <p>
+	 * {@code AiResponse} has no error channel — every agent's failure path
+	 * returns {@code content} set to the error text — so this is the only way a
+	 * caller can tell the difference. Recognising the shape rather than a
+	 * message list: what is certain is that a JSON-mapping answer begins with a
+	 * brace or a bracket, and prose never does.
+	 */
+	private static boolean looksLikeProviderError(String content) {
+		if (content == null || content.isBlank()) {
+			return true;
+		}
+		String trimmed = content.trim();
+		return !trimmed.startsWith("{") && !trimmed.startsWith("[");
+	}
+
+	/** Step keys are orders; anything unparseable sorts last so it is dropped first. */
+	private static int orderOf(String key) {
+		try {
+			return Integer.parseInt(key.trim());
+		} catch (NumberFormatException e) {
+			return Integer.MAX_VALUE;
 		}
 	}
 

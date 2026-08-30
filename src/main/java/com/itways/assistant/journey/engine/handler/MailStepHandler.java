@@ -70,6 +70,23 @@ public class MailStepHandler implements StepHandler {
             return StepResult.error("Mail Send Failed: no recipient after resolving placeholders.");
         }
 
+        if (com.itways.assistant.journey.engine.context.Simulation.isActive(context)) {
+            // Resolved first, then not sent: a rehearsal must still catch a
+            // recipient that interpolated to nothing, which is the failure this
+            // step actually has. Nobody receives anything.
+            log.info("SEND_MAIL step '{}' SIMULATED: would send '{}' to {}", step.getStepName(), subject, to);
+            java.util.Map<String, Object> metadata = new java.util.HashMap<>();
+            metadata.put(com.itways.assistant.journey.engine.context.Simulation.META_SIMULATED, true);
+            metadata.put("to", to);
+            metadata.put("subject", subject);
+            return StepResult.builder()
+                    .status("SUCCESS")
+                    .data(java.util.Map.of("simulated", true, "to", to, "subject", subject))
+                    .message(step.getMessage())
+                    .metadata(metadata)
+                    .build();
+        }
+
         if (mailDeliveryPort.isEmpty()) {
             // This step used to fabricate "Mail sent to X" and return SUCCESS with no
             // transport wired at all. Reporting a delivery that did not happen is

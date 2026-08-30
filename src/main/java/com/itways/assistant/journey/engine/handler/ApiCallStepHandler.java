@@ -79,6 +79,10 @@ public class ApiCallStepHandler implements StepHandler {
 			String url = engineUtils.replacePlaceholders(step.getActionTarget(), context.getVariables());
 			ApiConfig config = engineUtils.parseApiConfig(step.getApiConfig());
 
+			if (com.itways.assistant.journey.engine.context.Simulation.isActive(context)) {
+				return simulate(step, context, config, url);
+			}
+
 			HttpHeaders headers = new HttpHeaders();
 			headers.setContentType(MediaType.APPLICATION_JSON);
 			Map<String, Object> headerScope = headerScope(context);
@@ -117,6 +121,44 @@ public class ApiCallStepHandler implements StepHandler {
 		 log.error("API_CALL step '{}' unexpected error", step.getStepName(), e);
 			return StepResult.error("API Call Failed: " + e.getMessage());
 		}
+	}
+
+	/**
+	 * What this step would have called, without calling it.
+	 *
+	 * <p>
+	 * The URL and method are still interpolated first, so a rehearsal exercises
+	 * the placeholders — a URL that resolves to
+	 * {@code /tasks/} because the id was missing is exactly the bug a simulator
+	 * exists to surface, and stubbing before interpolation would hide it.
+	 *
+	 * <p>
+	 * The stub is a plain map rather than an invented payload shaped like the
+	 * customer's API. Guessing a response would let a downstream step read
+	 * {@code {{steps.3.output.items[0].name}}} and appear to work against data
+	 * no real call would return — a rehearsal that passes on fiction is worse
+	 * than one that plainly says nothing came back.
+	 */
+	private StepResult simulate(JourneyStep step, ExecutionContext context, ApiConfig config, String url) {
+		Map<String, Object> stub = new HashMap<>();
+		stub.put("simulated", true);
+		stub.put("method", config.getMethod());
+		stub.put("url", url);
+
+		variableContext.storeOutput(context, step, stub);
+		variableContext.writeStepField(context, step, "status", 200);
+		variableContext.writeStepField(context, step, "headers", Map.of());
+
+		log.info("---> API_CALL step '{}' SIMULATED: {} {}", step.getStepName(), config.getMethod(), url);
+
+		Map<String, Object> metadata = new HashMap<>();
+		metadata.put(com.itways.assistant.journey.engine.context.Simulation.META_SIMULATED, true);
+		return StepResult.builder()
+				.status("SUCCESS")
+				.data(stub)
+				.message(step.getMessage())
+				.metadata(metadata)
+				.build();
 	}
 
 	/**

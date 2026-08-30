@@ -104,6 +104,10 @@ public class JourneyEngineImpl implements JourneyEngine {
         // the variable picker, CODE_SCRIPT or DATA_MAP's prompt.
         EndUserAuth.lift(context, params);
 
+        // Likewise for the rehearsal flag: lifted before any step runs, so no
+        // journey can read {{simulate}} and behave differently under test.
+        com.itways.assistant.journey.engine.context.Simulation.lift(context, params);
+
         // The conversation language arrives the same way, and must be on the
         // context before seedRuntime publishes {{runtime.language}} from it.
         LanguageParams.lift(context, params);
@@ -126,7 +130,13 @@ public class JourneyEngineImpl implements JourneyEngine {
         seedRuntime(journey, context);
 
         // Durable RUNNING row before any business step; failure aborts the run.
-        emitLifecycle(buildLifecycleEvent(journey, context, JourneyRunLifecycleEvent.STATUS_RUNNING, null, null));
+        // Durable RUNNING row before any business step — except in a rehearsal,
+        // which must leave no trace: run history is what the journey's analytics
+        // are computed from, and an author testing a flow twenty times would
+        // otherwise bury the real traffic in it.
+        if (!com.itways.assistant.journey.engine.context.Simulation.isActive(context)) {
+            emitLifecycle(buildLifecycleEvent(journey, context, JourneyRunLifecycleEvent.STATUS_RUNNING, null, null));
+        }
 
         return finalizeResult(journey, context, execute(journey, context, observer));
     }
@@ -196,6 +206,9 @@ public class JourneyEngineImpl implements JourneyEngine {
         // JWT lives ~10 minutes), so a resumed run must adopt the new one rather than
         // keep the value captured when the journey started.
         EndUserAuth.lift(context, pending);
+        // A rehearsal stays a rehearsal across every turn: the flag is already
+        // on the parked context, and this only catches a resume that re-sends it.
+        com.itways.assistant.journey.engine.context.Simulation.lift(context, pending);
         LanguageParams.lift(context, pending);
         context.setInternal(TriggerJourneyStepHandler.PENDING_RESUME_INPUT, pending);
         context.setStatus(ExecutionStatus.RUNNING);
@@ -520,6 +533,13 @@ public class JourneyEngineImpl implements JourneyEngine {
 
     private Map<String, Object> finalizeResult(Journey journey, ExecutionContext context, Map<String, Object> result) {
         putIdentity(result, context);
+        if (com.itways.assistant.journey.engine.context.Simulation.isActive(context)) {
+            // A rehearsal writes no terminal row either, matching the suppressed
+            // RUNNING one. The console gets its trace from this result; history
+            // is for real conversations.
+            result.put(com.itways.assistant.journey.engine.context.Simulation.META_SIMULATED, true);
+            return result;
+        }
         String status = (String) result.get("status");
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> stepLogs = result.get("stepResults") instanceof List<?> list

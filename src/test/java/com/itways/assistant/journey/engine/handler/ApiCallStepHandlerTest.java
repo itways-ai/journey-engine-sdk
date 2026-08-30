@@ -162,6 +162,58 @@ class ApiCallStepHandlerTest {
     }
 
     @Nested
+    @DisplayName("under simulation")
+    class Simulated {
+
+        @Test
+        @DisplayName("nothing is called, and the step says so")
+        void doesNotCallTheHost() {
+            // The reason a simulator exists at all: testing a journey used to
+            // mean real calls to the customer's systems.
+            ExecutionContext context = context();
+            context.setInternal(com.itways.assistant.journey.engine.context.Simulation.INTERNAL_SIMULATE, true);
+
+            StepResult result = handler.execute(step(server.url("/orders/42"), null), context);
+
+            assertThat(result.getStatus()).isEqualTo("SUCCESS");
+            assertThat(server.method).isNull();
+            assertThat(result.getMetadata())
+                    .containsEntry(com.itways.assistant.journey.engine.context.Simulation.META_SIMULATED, true);
+        }
+
+        @Test
+        @DisplayName("the URL is still interpolated, so a placeholder that resolves to nothing still shows up")
+        void stillInterpolatesTheUrl() {
+            // Stubbing before interpolation would hide the most common API_CALL
+            // bug: an id that never resolved, leaving /orders/ as the path.
+            ExecutionContext context = context();
+            context.setInternal(com.itways.assistant.journey.engine.context.Simulation.INTERNAL_SIMULATE, true);
+
+            StepResult result = handler.execute(
+                    step(server.url("/orders/{{inputs.entities.orderId}}"), null), context);
+
+            assertThat(result.getData()).asInstanceOf(
+                    org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                    .containsEntry("simulated", true)
+                    .hasEntrySatisfying("url", url -> assertThat(String.valueOf(url)).endsWith("/orders/42"));
+        }
+
+        @Test
+        @DisplayName("downstream steps see a status but no invented payload")
+        void publishesStatusWithoutFiction() {
+            // An invented response shape would let a downstream step read
+            // fields no real call returns and appear to work.
+            ExecutionContext context = context();
+            context.setInternal(com.itways.assistant.journey.engine.context.Simulation.INTERNAL_SIMULATE, true);
+
+            handler.execute(step(server.url("/orders/42"), null), context);
+
+            assertThat(variableContext.read(context, "steps.2.status")).isEqualTo(200);
+            assertThat(variableContext.read(context, "steps.2.output.simulated")).isEqualTo(true);
+        }
+    }
+
+    @Nested
     @DisplayName("the response it publishes")
     class Response {
 
