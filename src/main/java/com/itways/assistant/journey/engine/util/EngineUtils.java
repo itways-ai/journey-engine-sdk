@@ -6,7 +6,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.context.expression.MapAccessor;
 import org.springframework.expression.ExpressionParser;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
-import org.springframework.expression.spel.support.StandardEvaluationContext;
+import org.springframework.expression.spel.support.DataBindingPropertyAccessor;
+import org.springframework.expression.spel.support.SimpleEvaluationContext;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -43,8 +44,17 @@ public class EngineUtils {
             clean = clean.substring(2, clean.length() - 2).trim();
         }
         try {
-            StandardEvaluationContext evalContext = new StandardEvaluationContext(context);
-            evalContext.addPropertyAccessor(new MapAccessor());
+            // SimpleEvaluationContext, not Standard: condition expressions are
+            // author-supplied text, and the Standard context exposes T(),
+            // constructors and bean references — a straight line from "can edit
+            // a journey" to running arbitrary Java. Data binding + instance
+            // methods covers every legitimate condition (map paths, comparisons,
+            // String.contains and friends); static methods stay unreachable.
+            SimpleEvaluationContext evalContext = SimpleEvaluationContext
+                    .forPropertyAccessors(new MapAccessor(), DataBindingPropertyAccessor.forReadOnlyAccess())
+                    .withInstanceMethods()
+                    .withRootObject(context)
+                    .build();
             return parser.parseExpression(clean).getValue(evalContext);
         } catch (Exception e) {
             // SpEL cannot parse numeric path segments (`steps.1.output`), so fall

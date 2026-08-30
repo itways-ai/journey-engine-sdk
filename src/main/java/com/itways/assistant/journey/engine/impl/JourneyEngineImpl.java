@@ -12,7 +12,6 @@ import com.itways.assistant.journey.engine.model.*;
 import com.itways.assistant.journey.engine.service.JourneyEngine;
 import com.itways.assistant.journey.engine.service.JourneyRunLifecyclePort;
 import com.itways.assistant.journey.engine.service.StepHandler;
-import com.itways.assistant.journey.engine.service.StepTextPort;
 import com.itways.assistant.journey.engine.service.StepObserver;
 import com.itways.assistant.journey.engine.service.StepHandlerRegistry;
 import com.itways.assistant.journey.engine.util.EngineUtils;
@@ -29,6 +28,18 @@ import java.util.*;
 @Service
 public class JourneyEngineImpl implements JourneyEngine {
 
+    /**
+     * Hard bounds on one turn's work. A backward JUMP rolls back the state
+     * written by the steps it replays, so a journey author cannot build a loop
+     * counter that survives its own loop — which means an author-written
+     * CONDITION→JUMP loop with a bad exit condition is an infinite loop, and it
+     * runs on the request thread. These caps turn "hangs forever" into a
+     * localized ERROR. Sized far above any legitimate journey: the largest demo
+     * journey executes ~30 steps per turn.
+     */
+    static final int MAX_JUMPS_PER_TURN = 50;
+    static final int MAX_EXECUTED_STEPS_PER_TURN = 2000;
+
     private final StepHandlerRegistry handlerRegistry;
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
@@ -36,13 +47,11 @@ public class JourneyEngineImpl implements JourneyEngine {
     private final List<JourneyRunLifecyclePort> lifecyclePorts;
     private final EngineMessages engineMessages;
     private final StepLocalizer stepLocalizer;
-    private final StepTextPort stepTextPort;
 
     public JourneyEngineImpl(StepHandlerRegistry handlerRegistry, EngineUtils engineUtils,
                              VariableContext variableContext, ObjectMapper objectMapper,
                              List<JourneyRunLifecyclePort> lifecyclePorts, EngineMessages engineMessages,
-                             StepLocalizer stepLocalizer,
-                             org.springframework.beans.factory.ObjectProvider<StepTextPort> stepTextPort) {
+                             StepLocalizer stepLocalizer) {
         this.handlerRegistry = handlerRegistry;
         this.engineUtils = engineUtils;
         this.variableContext = variableContext;
@@ -50,9 +59,6 @@ public class JourneyEngineImpl implements JourneyEngine {
         this.lifecyclePorts = lifecyclePorts != null ? lifecyclePorts : List.of();
         this.engineMessages = engineMessages;
         this.stepLocalizer = stepLocalizer;
-        // Optional: an application embedding the engine without a translation store
-        // still runs, it just never localizes authored text.
-        this.stepTextPort = stepTextPort.getIfAvailable(() -> StepTextPort.NONE);
     }
 
     @Override
@@ -231,29 +237,18 @@ public class JourneyEngineImpl implements JourneyEngine {
      * This journey's translated text for the run's language, or an empty map.
      *
      * <p>
-     * Skipped entirely when the run is in the language the journey was authored
-     * in, which is the common case and the one that must stay free.
-     *
-     * <p>
-     * Never propagates a failure: a translation store that is down leaves the
-     * conversation in the authored language, which is exactly how the platform
-     * behaved before translations existed. Failing the run instead would turn a
-     * cosmetic outage into a total one.
+     * Read off the {@link Journey} itself: the version payload carries the
+     * translations captured at publish, so published traffic can never pick up
+     * a draft retranslation, and a resume turn costs no extra lookup. A journey
+     * without them (older definitions, tests) simply serves authored text.
      */
     private Map<Long, StepText> loadTranslations(Journey journey, ExecutionContext context) {
-        Long journeyId = context.getJourneyId() != null ? context.getJourneyId() : journey.getId();
-        if (journeyId == null || stepTextPort == null) {
+        Map<String, Map<Long, StepText>> all = journey.getTranslations();
+        if (all == null || all.isEmpty()) {
             return Map.of();
         }
-        try {
-            Map<Long, StepText> found = stepTextPort.forJourney(context.getAccountId(), journeyId,
-                    context.resolvedLanguage());
-            return found != null ? found : Map.of();
-        } catch (Exception e) {
-            log.warn("Step translations unavailable for journey {} in {}; using authored text: {}",
-                    journeyId, context.resolvedLanguage().code(), e.getMessage());
-            return Map.of();
-        }
+        Map<Long, StepText> found = all.get(context.resolvedLanguage().code());
+        return found != null ? found : Map.of();
     }
 
     /** Per-step runtime facts: refreshed clock and the step currently executing. */
@@ -295,6 +290,8 @@ public class JourneyEngineImpl implements JourneyEngine {
         }
 
         int i = 0;
+        int jumps = 0;
+        int executedSteps = 0;
         // One lookup for the whole run rather than one per step: a run touches most
         // of its steps, and a per-step call would put a round trip inside the loop.
         // Re-read on every turn, not cached on the context, because a resumed run
@@ -336,6 +333,18 @@ public class JourneyEngineImpl implements JourneyEngine {
             }
 
             refreshStepRuntime(context, step);
+
+            executedSteps++;
+            if (executedSteps > MAX_EXECUTED_STEPS_PER_TURN) {
+                log.error("Journey '{}' exceeded {} step executions in one turn - stopping run {}",
+                        journey.getTriggerIntent(), MAX_EXECUTED_STEPS_PER_TURN, context.getExecutionId());
+                context.setStatus(ExecutionStatus.ERROR);
+                result.put("status", "ERROR");
+                result.put("message", engineMessages.get(context.resolvedLanguage(), "run.loopLimit"));
+                result.put("context", context);
+                result.put("stepResults", stepResults);
+                return result;
+            }
 
             long stepStart = System.currentTimeMillis();
             StepResult stepResult;
@@ -408,6 +417,17 @@ public class JourneyEngineImpl implements JourneyEngine {
                 }
                 return result;
             } else if ("JUMP".equals(stepResult.getStatus())) {
+                jumps++;
+                if (jumps > MAX_JUMPS_PER_TURN) {
+                    log.error("Journey '{}' exceeded {} jumps in one turn - stopping run {}",
+                            journey.getTriggerIntent(), MAX_JUMPS_PER_TURN, context.getExecutionId());
+                    context.setStatus(ExecutionStatus.ERROR);
+                    result.put("status", "ERROR");
+                    result.put("message", engineMessages.get(context.resolvedLanguage(), "run.loopLimit"));
+                    result.put("context", context);
+                    result.put("stepResults", stepResults);
+                    return result;
+                }
                 int targetOrder = (Integer) stepResult.getMetadata().get("targetOrder");
                 variableContext.clearStepOutputsFromOrder(context, targetOrder);
                 // Jumping back must roll back session state written by the steps

@@ -196,11 +196,6 @@ class StepLocalizerTest {
         private final Map<Long, StepText> saved = new java.util.HashMap<>();
 
         @Override
-        public Map<Long, StepText> forJourney(String accountId, Long journeyId, ConversationLanguage language) {
-            return Map.of();
-        }
-
-        @Override
         public void saveMachineTranslation(String accountId, Long stepId, ConversationLanguage language,
                 StepText text) {
             saved.put(stepId, text);

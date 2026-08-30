@@ -125,6 +125,31 @@ class CodeScriptStepHandlerTest {
         }
 
         @Test
+        @DisplayName("an infinite loop is stopped by the statement limit, not left hanging the turn")
+        void infiniteLoopIsStopped() {
+            // Scripts run on the request thread; before resource limits existed a
+            // while(true) parked the conversation forever. The statement limit
+            // stops it deterministically, without waiting for the wall clock.
+            StepResult result = handler.execute(scriptStep("while (true) {}"), context());
+
+            assertThat(result.getStatus()).isEqualTo("ERROR");
+            assertThat(result.getMessage()).contains("execution limits");
+        }
+
+        @Test
+        @DisplayName("scripts cannot reach Java host classes")
+        void hostAccessIsClosed() {
+            // HostAccess.NONE: the only thing a script may touch is its own
+            // variables. `Java.type` is the interop door and must not exist.
+            StepResult result = handler.execute(
+                    scriptStep("typeof Java === 'undefined' ? 'sealed' : Java.type('java.lang.Runtime').toString()"),
+                    context());
+
+            assertThat(result.getStatus()).isEqualTo("SUCCESS");
+            assertThat(result.getData()).isEqualTo("sealed");
+        }
+
+        @Test
         @DisplayName("a step with no code fails plainly instead of evaluating nothing")
         void missingCodeFails() {
             JourneyStep step = JourneyStep.builder()

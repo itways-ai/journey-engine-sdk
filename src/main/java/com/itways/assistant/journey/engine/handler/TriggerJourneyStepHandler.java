@@ -55,15 +55,18 @@ public class TriggerJourneyStepHandler implements StepHandler {
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
     private final JourneyEngine journeyEngine;
+    private final com.itways.assistant.journey.engine.language.EngineMessages engineMessages;
 
     public TriggerJourneyStepHandler(JourneyLookupPort journeyLookupPort, EngineUtils engineUtils,
                                      VariableContext variableContext, StepOutputSchemaHelper schemaHelper,
-                                     @Lazy JourneyEngine journeyEngine) {
+                                     @Lazy JourneyEngine journeyEngine,
+                                     com.itways.assistant.journey.engine.language.EngineMessages engineMessages) {
         this.journeyLookupPort = journeyLookupPort;
         this.engineUtils = engineUtils;
         this.variableContext = variableContext;
         this.schemaHelper = schemaHelper;
         this.journeyEngine = journeyEngine;
+        this.engineMessages = engineMessages;
     }
 
     @Override
@@ -97,10 +100,20 @@ public class TriggerJourneyStepHandler implements StepHandler {
                 return StepResult.error("TRIGGER_JOURNEY: corrupt nested execution state");
             }
 
-            childJourney = journeyLookupPort.findByTriggerIntent(context.getAccountId(), context.getAssistantId(), intent);
+            // Resume against the version the child was parked on, never the
+            // current definition — the whole point of pinning: a publish between
+            // the child's question and the user's answer must not remap the
+            // answer onto renumbered steps. No intent fallback; a pruned version
+            // means the run is gracefully dead, not silently rewired.
+            Object pinnedVersion = activeMap.get("versionId");
+            childJourney = pinnedVersion instanceof Number pinned
+                    ? journeyLookupPort.findByVersionId(context.getAccountId(), pinned.longValue())
+                    : null;
             if (childJourney == null) {
                 context.removeInternal(ACTIVE_TRIGGERED_JOURNEY);
-                return StepResult.error("TRIGGER_JOURNEY: journey not found for intent '" + intent + "'");
+                return StepResult.error(
+                        "TRIGGER_JOURNEY: pinned version " + pinnedVersion + " gone for intent '" + intent + "'",
+                        engineMessages.get(context.resolvedLanguage(), "run.versionGone"));
             }
 
             Map<String, Object> pending = context.getInternal(PENDING_RESUME_INPUT) instanceof Map<?, ?> p
@@ -171,6 +184,12 @@ public class TriggerJourneyStepHandler implements StepHandler {
         if ("WAITING".equals(childStatus)) {
             Map<String, Object> active = new HashMap<>();
             active.put("intent", intent);
+            // The pin. Every runtime-loaded journey carries the published
+            // version it came from; a versionless one (possible only in embeddings
+            // that bypass publishing) parks unresumably and dies as versionGone.
+            if (childJourney.getVersionId() != null) {
+                active.put("versionId", childJourney.getVersionId());
+            }
             if (childCtx != null && childCtx.getJourneyId() != null) {
                 active.put("journeyId", childCtx.getJourneyId());
             }

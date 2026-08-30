@@ -64,9 +64,9 @@ class TriggerJourneyStepHandlerTest {
         StepLocalizer localizer = new StepLocalizer(objectMapper, new LanguageDetector(),
                 providerOf(null), providerOf(null));
         engine = new JourneyEngineImpl(registry, engineUtils, variableContext, objectMapper,
-                List.of(), engineMessages, localizer, providerOf(null));
+                List.of(), engineMessages, localizer);
         handler = new TriggerJourneyStepHandler(lookup, engineUtils, variableContext,
-                schemaHelper, engine);
+                schemaHelper, engine, engineMessages);
         registry.registerHandler(handler);
         childHandler = new ScriptedHandler("CHILD_STUB");
         registry.registerHandler(childHandler);
@@ -327,6 +327,59 @@ class TriggerJourneyStepHandlerTest {
             // into the finished child instead of onward through the parent.
             assertThat(parent.getInternal(TriggerJourneyStepHandler.ACTIVE_TRIGGERED_JOURNEY)).isNull();
         }
+
+        @Test
+        @DisplayName("a parked child resumes on the version it started with, not on a republished one")
+        void resumeIsPinnedToTheParkedVersion() {
+            Journey original = journey("child-flow", childStub(1));
+            lookup.register(original);
+            childAsksForOrderNumber();
+            ExecutionContext parent = parentContext();
+            handler.execute(triggerStep("child-flow"), parent);
+
+            // A publish happens while the user is thinking: the same intent now
+            // resolves to a different version whose step 1 is a different step.
+            Journey republished = Journey.builder()
+                    .id(original.getId()).versionId(original.getVersionId() + 999)
+                    .name("child-flow").triggerIntent("child-flow").active(true)
+                    .steps(List.of(childStub(1), childStub(2)))
+                    .build();
+            lookup.register(republished);
+
+            parent.setInternal(TriggerJourneyStepHandler.PENDING_RESUME_INPUT,
+                    Map.of("answer", "A-42"));
+            parent.setStatus(ExecutionStatus.RUNNING);
+            StepResult result = handler.execute(triggerStep("child-flow"), parent);
+
+            // The answer landed on the original one-step definition: the child
+            // finished, which it could not have done on the two-step republish.
+            assertThat(result.getStatus()).isEqualTo("SUCCESS");
+            assertThat(result.getData()).isEqualTo("A-42");
+        }
+
+        @Test
+        @DisplayName("a parked child whose pinned version is gone dies gracefully, not silently rewired")
+        void prunedVersionEndsTheChildGracefully() {
+            lookup.register(journey("child-flow", childStub(1)));
+            childAsksForOrderNumber();
+            ExecutionContext parent = parentContext();
+            handler.execute(triggerStep("child-flow"), parent);
+
+            // Retention pruned the pinned version while the run was parked.
+            lookup.byVersion.clear();
+
+            parent.setInternal(TriggerJourneyStepHandler.PENDING_RESUME_INPUT,
+                    Map.of("answer", "A-42"));
+            parent.setStatus(ExecutionStatus.RUNNING);
+            StepResult result = handler.execute(triggerStep("child-flow"), parent);
+
+            assertThat(result.getStatus()).isEqualTo("ERROR");
+            // The diagnostic names the version; the user gets a localized sentence.
+            assertThat(result.getMessage()).contains("pinned version");
+            assertThat(result.getUserMessage()).isNotBlank();
+            // The dead marker is cleared so the next turn is not a retry loop.
+            assertThat(parent.getInternal(TriggerJourneyStepHandler.ACTIVE_TRIGGERED_JOURNEY)).isNull();
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -336,6 +389,9 @@ class TriggerJourneyStepHandlerTest {
     private Journey journey(String intent, JourneyStep... steps) {
         return Journey.builder()
                 .id((long) intent.hashCode())
+                // Runtime-loaded journeys always come from a published version;
+                // a parked child resumes by this pin, so the fixture carries one.
+                .versionId((long) intent.hashCode() + 1000)
                 .name(intent)
                 .triggerIntent(intent)
                 .active(true)
@@ -376,16 +432,26 @@ class TriggerJourneyStepHandlerTest {
     private static final class StubLookupPort implements JourneyLookupPort {
 
         private final Map<String, Journey> journeys = new HashMap<>();
+        private final Map<Long, Journey> byVersion = new HashMap<>();
         private String accountId;
 
         void register(Journey journey) {
             journeys.put(journey.getTriggerIntent(), journey);
+            if (journey.getVersionId() != null) {
+                byVersion.put(journey.getVersionId(), journey);
+            }
         }
 
         @Override
         public Journey findByTriggerIntent(String accountId, java.util.UUID assistantId, String intent) {
             this.accountId = accountId;
             return journeys.get(intent);
+        }
+
+        @Override
+        public Journey findByVersionId(String accountId, Long versionId) {
+            this.accountId = accountId;
+            return byVersion.get(versionId);
         }
     }
 

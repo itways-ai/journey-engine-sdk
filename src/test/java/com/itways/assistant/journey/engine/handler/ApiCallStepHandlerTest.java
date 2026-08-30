@@ -28,7 +28,7 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * API_CALL owns a private static RestTemplate, so these tests speak real HTTP
+ * API_CALL owns a private RestTemplate, so these tests speak real HTTP
  * to a throwaway server on an ephemeral localhost port instead of mocking the
  * client (Mockito is unusable in this module anyway — see
  * {@link TemplateRenderHandlerTest}). What the server records is the handler's
@@ -43,7 +43,8 @@ class ApiCallStepHandlerTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final VariableContext variableContext = new VariableContext();
     private final ApiCallStepHandler handler = new ApiCallStepHandler(
-            new EngineUtils(objectMapper), variableContext, new StepOutputSchemaHelper(objectMapper));
+            new EngineUtils(objectMapper), variableContext, new StepOutputSchemaHelper(objectMapper),
+            5000, 30000);
 
     private RecordingServer server;
 
@@ -200,6 +201,23 @@ class ApiCallStepHandlerTest {
         }
 
         @Test
+        @DisplayName("a host that never answers times out into a step ERROR instead of hanging the turn")
+        void slowHostTimesOut() {
+            // The engine runs API calls on the request thread; before read
+            // timeouts existed, a silent host parked the whole conversation
+            // forever. 250ms timeout vs a 2s reply proves the bound is real.
+            ApiCallStepHandler impatient = new ApiCallStepHandler(
+                    new EngineUtils(objectMapper), variableContext,
+                    new StepOutputSchemaHelper(objectMapper), 5000, 250);
+            server.delayMs = 2000;
+
+            StepResult result = impatient.execute(step(server.url("/slow"), null), context());
+
+            assertThat(result.getStatus()).isEqualTo("ERROR");
+            assertThat(result.getMessage()).contains("did not answer in time");
+        }
+
+        @Test
         @DisplayName("an unreachable host is a step ERROR, not a crashed run")
         void connectionRefusedBecomesStepError() throws IOException {
             int deadPort;
@@ -226,6 +244,7 @@ class ApiCallStepHandlerTest {
 
         volatile int responseStatus = 200;
         volatile String responseBody = "{\"id\":7,\"status\":\"ok\"}";
+        volatile long delayMs = 0;
 
         volatile String method;
         volatile URI uri;
@@ -239,6 +258,13 @@ class ApiCallStepHandlerTest {
                 uri = exchange.getRequestURI();
                 headers = exchange.getRequestHeaders();
                 body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                if (delayMs > 0) {
+                    try {
+                        Thread.sleep(delayMs);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
                 byte[] out = responseBody.getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().set("Content-Type", "application/json");
                 exchange.sendResponseHeaders(responseStatus, out.length);

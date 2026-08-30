@@ -1,6 +1,9 @@
 package com.itways.assistant.journey.engine.model;
 
 import java.util.List;
+import java.util.Map;
+
+import com.itways.assistant.journey.engine.language.StepText;
 
 import lombok.Builder;
 import lombok.Data;
@@ -13,6 +16,18 @@ import lombok.AllArgsConstructor;
 @AllArgsConstructor
 public class Journey {
     private Long id;
+
+    /**
+     * The immutable published version this definition was loaded from.
+     *
+     * <p>
+     * Runs pin to it: a paused conversation resumes against the version it
+     * started on, never against a draft edited since — resuming against a
+     * renumbered definition used to land the user's answer on the wrong step.
+     * Null only for definitions that predate versioning.
+     */
+    private Long versionId;
+
     private String name;
     private String triggerIntent;
     private String variableMapping;
@@ -20,6 +35,17 @@ public class Journey {
     private String slug;
     private String uniqueCode;
     private boolean active;
+
+    /**
+     * Translations captured at publish, keyed {@code locale → stepId → text}.
+     *
+     * <p>
+     * Carried on the version payload rather than fetched live so a draft
+     * retranslation can never leak into published traffic, and so a resume turn
+     * costs no extra lookup. Null or missing locale simply means "serve the
+     * authored text".
+     */
+    private Map<String, Map<Long, StepText>> translations;
 
     /**
      * Variables this journey is allowed to leave in conversation memory.

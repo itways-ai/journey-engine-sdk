@@ -29,20 +29,34 @@ import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
 import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class ApiCallStepHandler implements StepHandler {
 
 	private final EngineUtils engineUtils;
 	private final VariableContext variableContext;
 	private final StepOutputSchemaHelper schemaHelper;
+	private final RestTemplate restTemplate;
 
-	private static final RestTemplate restTemplate = new RestTemplate(
-			new BufferingClientHttpRequestFactory(new SimpleClientHttpRequestFactory()));
+	public ApiCallStepHandler(EngineUtils engineUtils, VariableContext variableContext,
+			StepOutputSchemaHelper schemaHelper,
+			@org.springframework.beans.factory.annotation.Value("${nibras.journey.api-call.connect-timeout-ms:5000}") int connectTimeoutMs,
+			@org.springframework.beans.factory.annotation.Value("${nibras.journey.api-call.read-timeout-ms:30000}") int readTimeoutMs) {
+		this.engineUtils = engineUtils;
+		this.variableContext = variableContext;
+		this.schemaHelper = schemaHelper;
+		// Timeouts are non-negotiable: this runs on the request thread, so a
+		// host that never answers used to hang the whole turn indefinitely.
+		// Deliberately a local instance, not an injected bean — an injected
+		// RestTemplate risks silently picking up ai-engine-sdk's
+		// trust-all-certificates template through auto-configuration.
+		SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+		factory.setConnectTimeout(connectTimeoutMs);
+		factory.setReadTimeout(readTimeoutMs);
+		this.restTemplate = new RestTemplate(new BufferingClientHttpRequestFactory(factory));
+	}
 
 	@Override
 	public String getType() {
@@ -94,6 +108,11 @@ public class ApiCallStepHandler implements StepHandler {
 			String bodyMsg = e.getResponseBodyAsString();
 			return StepResult.error("API Call Failed [" + e.getStatusCode() + "]: " +
 					(bodyMsg != null && !bodyMsg.isBlank() ? bodyMsg : e.getMessage()));
+		} catch (org.springframework.web.client.ResourceAccessException e) {
+			// Connect/read timeout or unreachable host. Named separately so run
+			// history says "timed out" instead of a raw I/O stack message.
+			log.error("API_CALL step '{}' did not answer in time: {}", step.getStepName(), e.getMessage());
+			return StepResult.error("API Call Failed: host did not answer in time (" + e.getMessage() + ")");
 		} catch (Exception e) {
 		 log.error("API_CALL step '{}' unexpected error", step.getStepName(), e);
 			return StepResult.error("API Call Failed: " + e.getMessage());

@@ -84,6 +84,43 @@ class EngineUtilsTest {
             assertThat(engineUtils.evaluateExpression(null, context)).isNull();
             assertThat(engineUtils.evaluateExpression("", context)).isNull();
         }
+
+        @Test
+        @DisplayName("instance methods on values still work — conditions rely on contains/startsWith")
+        void instanceMethodsAllowed() {
+            assertThat(engineUtils.evaluateExpression("state.name.contains('Am')", context)).isEqualTo(true);
+            assertThat(engineUtils.evaluateExpression("state.name.startsWith('X')", context)).isEqualTo(false);
+        }
+    }
+
+    @Nested
+    @DisplayName("expression sandbox")
+    class Sandbox {
+
+        // Condition expressions are author-supplied text. The Standard SpEL
+        // context exposed T(), constructors and bean references — a straight
+        // line from "can edit a journey" to Runtime.exec. These pin the seal.
+
+        @Test
+        @DisplayName("T() type references cannot reach Java classes")
+        void typeReferencesBlocked() {
+            assertThat(engineUtils.evaluateExpression(
+                    "T(java.lang.Runtime).getRuntime()", context)).isNull();
+        }
+
+        @Test
+        @DisplayName("constructors cannot be invoked")
+        void constructorsBlocked() {
+            assertThat(engineUtils.evaluateExpression(
+                    "new java.lang.ProcessBuilder('cmd').start()", context)).isNull();
+        }
+
+        @Test
+        @DisplayName("static methods cannot be invoked through a Class reference")
+        void staticMethodsBlocked() {
+            assertThat(engineUtils.evaluateExpression(
+                    "''.getClass().forName('java.lang.Runtime')", context)).isNull();
+        }
     }
 
     @Nested

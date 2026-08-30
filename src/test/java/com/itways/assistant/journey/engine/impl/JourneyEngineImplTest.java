@@ -65,7 +65,7 @@ class JourneyEngineImplTest {
         StepLocalizer localizer = new StepLocalizer(objectMapper, new LanguageDetector(),
                 providerOf(null), providerOf(null));
         return new JourneyEngineImpl(registry, engineUtils, variableContext, objectMapper,
-                ports, engineMessages, localizer, providerOf(null));
+                ports, engineMessages, localizer);
     }
 
     // ---- Scenarios ----
@@ -387,6 +387,29 @@ class JourneyEngineImplTest {
 
             assertThat(result.get("status")).isEqualTo("FINISHED");
             assertThat(handler.executedOrders).containsExactly(1, 2, 1, 2);
+        }
+
+        @Test
+        @DisplayName("an unconditional backward jump is stopped at the jump cap instead of hanging the turn")
+        void infiniteJumpLoopIsCapped() {
+            // The state rollback above means an author cannot build a loop
+            // counter that survives its own loop — so a bad exit condition IS an
+            // infinite loop, and it runs on the request thread. The cap turns
+            // "hangs forever" into a localized ERROR.
+            ScriptedHandler handler = registerScripted("STUB");
+            handler.on(1, (step, context) -> StepResult.success("pass"));
+            handler.on(2, (step, context) -> StepResult.jump(1, "again"));
+
+            Map<String, Object> result = engine.start(
+                    journeyOf(stub(1, null), stub(2, 1)), ACCOUNT, null, Map.of());
+
+            assertThat(result.get("status")).isEqualTo("ERROR");
+            assertThat(result.get("message")).isEqualTo(engineMessages.get(
+                    com.itways.assistant.journey.engine.language.ConversationLanguage.ENGLISH,
+                    "run.loopLimit"));
+            // Bounded work: the cap fired, not the heat death of the request thread.
+            assertThat(handler.executedOrders.size())
+                    .isLessThanOrEqualTo(2 * (JourneyEngineImpl.MAX_JUMPS_PER_TURN + 1));
         }
     }
 

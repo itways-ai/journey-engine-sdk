@@ -18,4 +18,17 @@ public interface JourneyLookupPort {
      * @return the journey including steps, or {@code null} if not found
      */
     Journey findByTriggerIntent(String accountId, java.util.UUID assistantId, String intent);
+
+    /**
+     * Loads the immutable published version a run is pinned to.
+     *
+     * <p>
+     * Used on resume paths — a parked child journey must come back on the
+     * definition it started with, not whatever was published since.
+     *
+     * @return the journey content of that version, or {@code null} if the
+     *         version no longer exists (pruned); callers treat that as a
+     *         gracefully dead run, not an error to retry
+     */
+    Journey findByVersionId(String accountId, Long versionId);
 }
