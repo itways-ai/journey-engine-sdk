@@ -461,6 +461,13 @@ public class JourneyEngineImpl implements JourneyEngine {
         if (context.getStatus() == ExecutionStatus.RUNNING) {
             context.setStatus(ExecutionStatus.COMPLETED);
             result.put("status", "FINISHED");
+        } else if (context.getStatus() == ExecutionStatus.COMPLETED) {
+            // A handler ended the run deliberately rather than the loop running
+            // out of steps — HANDOFF does this, because a conversation given to
+            // a person must not continue executing the script. Without this
+            // branch the result carried no status at all, so no lifecycle event
+            // was emitted and the run never appeared finished in history.
+            result.put("status", "FINISHED");
         } else if (context.getStatus() == ExecutionStatus.ERROR) {
             result.put("status", "ERROR");
         }

@@ -1,6 +1,7 @@
 package com.itways.assistant.journey.engine.handler;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.springframework.stereotype.Component;
@@ -18,6 +19,7 @@ import com.itways.assistant.journey.engine.model.StepResult;
 import com.itways.assistant.journey.engine.service.StepHandler;
 import com.itways.assistant.journey.engine.util.EngineUtils;
 import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
+import com.itways.assistant.journey.engine.validation.AnswerValidator;
 
 import lombok.RequiredArgsConstructor;
 
@@ -39,11 +41,27 @@ public class UserInputStepHandler implements StepHandler {
      */
     static final String PREFILL_PENDING_PREFIX = "userInputPrefill_";
 
+    /** Engine-internal: how many invalid answers this step has already refused. */
+    static final String ATTEMPTS_PREFIX = "userInputAttempts_";
+
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
     private final EngineMessages messages;
     private final DecisionWords decisionWords;
+
+    /**
+     * How many times a step re-asks before giving up.
+     *
+     * <p>
+     * Bounded because the alternative is a loop with no exit: a user who cannot
+     * produce what the field demands — a phone number for someone who has none,
+     * a pattern nobody can satisfy because the author's regex is wrong — would
+     * be asked forever. Three tries is enough for a typo and short enough that a
+     * genuinely impossible question surfaces as a failed run someone can look at.
+     */
+    @org.springframework.beans.factory.annotation.Value("${nibras.journey.user-input.max-attempts:3}")
+    private int maxAttempts = 3;
 
     @Override
     public String getType() {
@@ -88,6 +106,15 @@ public class UserInputStepHandler implements StepHandler {
         }
 
         if (answer != null) {
+            // Validate before storing. Until this existed the engine took any
+            // answer at all: a widget enforced the author's rules and every
+            // messaging channel ignored them.
+            StepResult rejected = rejectInvalidAnswer(step, context, uiConfig, inputs, answer);
+            if (rejected != null) {
+                return rejected;
+            }
+            context.removeInternal(ATTEMPTS_PREFIX + step.getStepOrder());
+
             variableContext.storeOutput(context, step, answer);
             inputs.remove("answer");
 
@@ -131,6 +158,85 @@ public class UserInputStepHandler implements StepHandler {
                 : messages.get(context.resolvedLanguage(), "step.userInput.waiting", step.getStepName());
 
         return StepResult.waiting(prompt, metadata);
+    }
+
+    /**
+     * Re-asks when the answer breaks a declared constraint, or null to accept it.
+     *
+     * <p>
+     * Two things count as unusable: an answer that fails one of the author's
+     * field validations, and a blank one. Blank matters on its own because a
+     * messaging channel can deliver an empty or whitespace message, and storing
+     * that used to satisfy the step — the journey moved on with {@code ""} where
+     * it expected a name.
+     *
+     * <p>
+     * The rejected answer is removed from inputs on the way out. Left there it
+     * would be re-read on the next turn and refused again without the user
+     * having said anything.
+     */
+    private StepResult rejectInvalidAnswer(JourneyStep step, ExecutionContext context, ApiConfig uiConfig,
+                                           Map<String, Object> inputs, Object answer) {
+        boolean blank = answer instanceof String text && text.isBlank();
+        List<AnswerValidator.FieldError> errors = blank
+                ? List.of()
+                : AnswerValidator.validate(answer, uiConfig.getFields(), uiConfig.getRules());
+        if (!blank && errors.isEmpty()) {
+            return null;
+        }
+
+        inputs.remove("answer");
+
+        String attemptsKey = ATTEMPTS_PREFIX + step.getStepOrder();
+        int attempts = (context.getInternal(attemptsKey) instanceof Number n ? n.intValue() : 0) + 1;
+
+        if (attempts >= maxAttempts) {
+            context.removeInternal(attemptsKey);
+            // Halts the run rather than storing the bad value. The diagnostic
+            // names the step for run history; the user gets a plain sentence.
+            return StepResult.error(
+                    "USER_INPUT step '" + step.getStepName() + "' gave up after " + attempts
+                            + " invalid answers: " + describe(errors, context),
+                    messages.get(context.resolvedLanguage(), "step.userInput.tooManyAttempts"));
+        }
+        context.setInternal(attemptsKey, attempts);
+        context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);
+
+        Map<String, Object> metadata = prepareMetadata(step, uiConfig);
+        metadata.put("subStatus", "VALIDATION_FAILED");
+        metadata.put("attemptsRemaining", maxAttempts - attempts);
+        if (!errors.isEmpty()) {
+            // Per-field, so a widget can highlight the offending inputs rather
+            // than only printing a sentence above the form.
+            List<Map<String, Object>> rendered = new java.util.ArrayList<>();
+            for (AnswerValidator.FieldError error : errors) {
+                Map<String, Object> entry = new HashMap<>();
+                entry.put("field", error.field());
+                entry.put("label", error.label());
+                entry.put("message", messages.get(context.resolvedLanguage(), error.messageKey(), error.args()));
+                rendered.add(entry);
+            }
+            metadata.put("validationErrors", rendered);
+        }
+
+        String message = blank
+                ? messages.get(context.resolvedLanguage(), "step.userInput.empty")
+                : messages.get(context.resolvedLanguage(), "step.userInput.fixErrors", describe(errors, context));
+        return StepResult.waiting(message, metadata);
+    }
+
+    /** "Email: enter a valid email address" — joined for a one-line reply. */
+    private String describe(List<AnswerValidator.FieldError> errors, ExecutionContext context) {
+        StringBuilder text = new StringBuilder();
+        for (AnswerValidator.FieldError error : errors) {
+            if (!text.isEmpty()) {
+                text.append(" ");
+            }
+            String sentence = messages.get(context.resolvedLanguage(), error.messageKey(), error.args());
+            // A form-wide failure has no field to name; it reads as a sentence alone.
+            text.append(error.label() == null ? sentence : error.label() + ": " + sentence);
+        }
+        return text.toString();
     }
 
     /**

@@ -44,10 +44,44 @@ class KnowledgeRetrievalStepHandlerTest {
     private final StubKnowledgePort port = new StubKnowledgePort();
 
     private KnowledgeRetrievalStepHandler handler(TextTranslator translator) {
+        return handler(translator, silentAi());
+    }
+
+    private KnowledgeRetrievalStepHandler handler(TextTranslator translator,
+            com.itways.assistant.ai.service.AiService ai) {
         return new KnowledgeRetrievalStepHandler(
                 new EngineUtils(objectMapper), variableContext,
-                new StepOutputSchemaHelper(objectMapper), embedding, port, messages, translator);
+                new StepOutputSchemaHelper(objectMapper), embedding, port, messages, translator,
+                ai, account -> new com.itways.assistant.ai.dto.AiRequestConfig());
     }
+
+    /**
+     * A provider that answers nothing, so synthesis stays out of the way of the
+     * scoring tests. Composition has its own test below; everything else here is
+     * about which chunk wins, which must not depend on a model being reachable.
+     */
+    private com.itways.assistant.ai.service.AiService silentAi() {
+        return composingAi(null);
+    }
+
+    /** AiService is a concrete class, so it is subclassed — the module cannot use Mockito. */
+    private com.itways.assistant.ai.service.AiService composingAi(String answer) {
+        return new com.itways.assistant.ai.service.AiService(java.util.Map.of()) {
+            @Override
+            public com.itways.assistant.ai.dto.AiResponse chat(com.itways.assistant.ai.dto.AiChatRequest request) {
+                lastPrompt = request.getMessages().get(request.getMessages().size() - 1).getContent();
+                if (answer == null) {
+                    return null;
+                }
+                com.itways.assistant.ai.dto.AiResponse response = new com.itways.assistant.ai.dto.AiResponse();
+                response.setContent(answer);
+                return response;
+            }
+        };
+    }
+
+    /** What the last synthesis call was asked, for asserting the sources reached it. */
+    private String lastPrompt;
 
     private final KnowledgeRetrievalStepHandler handler = handler(TextTranslator.NONE);
 
@@ -127,6 +161,74 @@ class KnowledgeRetrievalStepHandlerTest {
 
             assertThat(result.getStatus()).isEqualTo("ERROR");
             assertThat(result.getMessage()).contains("indexName is required");
+        }
+    }
+
+    @Nested
+    @DisplayName("composing an answer")
+    class Synthesis {
+
+        @Test
+        @DisplayName("two qualifying chunks are composed into one answer, quoting both to the model")
+        void composesFromSeveralSources() {
+            // The failure this fixes: an answer split across two rows — the
+            // refund window in one, its exclusions in another — used to return
+            // whichever scored higher, with no sign the rest existed.
+            port.results = List.of(
+                    hit("Refunds are available for 30 days.", 0.88, "en"),
+                    hit("Sale items are excluded from refunds.", 0.81, "en"));
+            ExecutionContext context = context();
+            var composing = handler(TextTranslator.NONE,
+                    composingAi("Refunds run for 30 days, though sale items are excluded."));
+
+            StepResult result = composing.execute(step("{\"indexName\":\"faq\"}"), context);
+
+            assertThat(result.getData())
+                    .isEqualTo("Refunds run for 30 days, though sale items are excluded.");
+            assertThat(lastPrompt).contains("Refunds are available for 30 days.")
+                    .contains("Sale items are excluded from refunds.");
+            // Sources travel with the output so a client can cite them.
+            assertThat(variableContext.read(context, "steps.2.sources")).asInstanceOf(
+                    org.assertj.core.api.InstanceOfAssertFactories.LIST).hasSize(2);
+            assertThat(variableContext.read(context, "steps.2.composed")).isEqualTo(true);
+        }
+
+        @Test
+        @DisplayName("a single qualifying chunk is returned as stored — it is already the answer")
+        void singleChunkIsNotRephrased() {
+            // Paraphrasing a carefully worded policy costs a call and risks
+            // changing what it says, for no gain.
+            port.results = List.of(hit("Refunds are available for 30 days.", 0.88, "en"),
+                    hit("Unrelated and below the floor.", 0.40, "en"));
+            ExecutionContext context = context();
+            var composing = handler(TextTranslator.NONE, composingAi("Something the model made up."));
+
+            StepResult result = composing.execute(step("{\"indexName\":\"faq\"}"), context);
+
+            assertThat(result.getData()).isEqualTo("Refunds are available for 30 days.");
+            assertThat(variableContext.read(context, "steps.2.composed")).isEqualTo(false);
+        }
+
+        @Test
+        @DisplayName("an unreachable provider still answers, from the stored chunk")
+        void fallsBackToStoredAnswerWhenTheModelFails() {
+            port.results = List.of(hit("Use the reset link.", 0.88, "en"),
+                    hit("Contact support.", 0.80, "en"));
+            ExecutionContext context = context();
+            var failing = handler(TextTranslator.NONE, new com.itways.assistant.ai.service.AiService(
+                    java.util.Map.of()) {
+                @Override
+                public com.itways.assistant.ai.dto.AiResponse chat(
+                        com.itways.assistant.ai.dto.AiChatRequest request) {
+                    throw new IllegalStateException("provider down");
+                }
+            });
+
+            StepResult result = failing.execute(step("{\"indexName\":\"faq\"}"), context);
+
+            assertThat(result.getStatus()).isEqualTo("SUCCESS");
+            assertThat(result.getData()).isEqualTo("Use the reset link.");
+            assertThat(variableContext.read(context, "steps.2.composed")).isEqualTo(false);
         }
     }
 

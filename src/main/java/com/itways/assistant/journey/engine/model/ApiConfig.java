@@ -85,6 +85,14 @@ public class ApiConfig {
     private String languageHint;
     private String pages;
 
+    // Elite: Human Handoff
+    /** HANDOFF: routing label for whoever picks the conversation up, e.g. "support". */
+    private String queue;
+    /** HANDOFF: context for the human, interpolated — supports {{variables}}. */
+    private String note;
+    /** HANDOFF: how long the author expects a human to take; advisory metadata only. */
+    private Integer timeoutMinutes;
+
     // Discovery UI Persistence
     private String configMode;
     private String swaggerUrl;

@@ -26,7 +26,9 @@ import com.itways.assistant.journey.engine.util.EngineUtils;
 import com.itways.assistant.journey.engine.util.StepOutputSchemaHelper;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class DataMapStepHandler implements StepHandler {
@@ -95,12 +97,113 @@ public class DataMapStepHandler implements StepHandler {
 				mappedData = unflattenMap((Map<String, Object>) mappedData);
 			}
 
+			mappedData = repairMissingFields(mappedData, action, userPrompt, files, aiRequestConfig, step);
+
 			variableContext.storeOutput(context, step, mappedData);
 
 			return StepResult.success(mappedData, step.getMessage());
 		} catch (Exception e) {
 			return StepResult.error("Data Mapping Failed: " + e.getMessage());
 		}
+	}
+
+	/**
+	 * Asks once more for the fields the model left out, then gives up.
+	 *
+	 * <p>
+	 * The author declares a shape — {@code {"briefing": ""}} — and downstream
+	 * steps address it by name. When the model answers with prose, an empty
+	 * string, or a differently-named key, every {@code {{steps.N.output.briefing}}}
+	 * downstream silently resolves to nothing and the journey delivers a blank
+	 * message. Two of the demo catalogue's journeys failed exactly this way,
+	 * intermittently, with no error anywhere: the step reported SUCCESS.
+	 *
+	 * <p>
+	 * One retry, not a loop. A model that ignores an explicit field list twice
+	 * is not going to comply on the third ask, and each attempt costs a call.
+	 * Nothing is fabricated to fill a gap that survives the retry — an invented
+	 * value would be worse than a visible blank, and the unresolved-variable
+	 * diagnostic stays attached to the step so the failure is inspectable.
+	 */
+	@SuppressWarnings("unchecked")
+	private Object repairMissingFields(Object mappedData, String jsonTemplate, String userPrompt,
+			List<com.itways.assistant.ai.dto.AiWrappedFile> files, AiRequestConfig aiRequestConfig,
+			JourneyStep step) {
+		if (!(mappedData instanceof Map)) {
+			return mappedData;
+		}
+		Map<String, Object> mapped = (Map<String, Object>) mappedData;
+		List<String> missing = missingDeclaredFields(jsonTemplate, mapped);
+		if (missing.isEmpty()) {
+			return mappedData;
+		}
+
+		log.warn("DATA_MAP step '{}' returned no value for {} — asking once more", step.getStepName(), missing);
+		try {
+			String repairPrompt = userPrompt
+					+ "\n\nYour previous answer left these fields empty or missing: " + String.join(", ", missing)
+					+ ".\nReturn the same JSON object again with every one of those fields present and filled in"
+					+ " from the information available. Do not return an empty string for them.";
+
+			AiResponse retry = aiService.chat(AiChatRequest.builder()
+					.messages(List.of(AiMessage.system(DEFAULT_FILL_SYSTEM_PROMPT), AiMessage.user(repairPrompt)))
+					.files(files)
+					.config(aiRequestConfig).build());
+
+			Object reparsed = objectMapper.readValue(stripMarkdownCodeBlocks(retry.getContent()), Object.class);
+			if (reparsed instanceof Map) {
+				Map<String, Object> second = unflattenMap((Map<String, Object>) reparsed);
+				// Only the gaps are taken from the retry. Everything the first
+				// answer got right stands — a second pass is not a second opinion.
+				for (String field : missing) {
+					Object value = second.get(field);
+					if (!isBlank(value)) {
+						mapped.put(field, value);
+					}
+				}
+			}
+		} catch (Exception e) {
+			log.warn("DATA_MAP step '{}' repair attempt failed: {}", step.getStepName(), e.getMessage());
+			return mapped;
+		}
+
+		List<String> stillMissing = missingDeclaredFields(jsonTemplate, mapped);
+		if (!stillMissing.isEmpty()) {
+			log.error("DATA_MAP step '{}' still has no value for {} after a retry; downstream references to them"
+					+ " will resolve to nothing", step.getStepName(), stillMissing);
+		}
+		return mapped;
+	}
+
+	/** Top-level keys the author's template declares that the answer did not fill. */
+	@SuppressWarnings("unchecked")
+	private List<String> missingDeclaredFields(String jsonTemplate, Map<String, Object> mapped) {
+		if (jsonTemplate == null || jsonTemplate.isBlank()) {
+			return List.of();
+		}
+		Map<String, Object> declared;
+		try {
+			Object parsed = objectMapper.readValue(jsonTemplate, Object.class);
+			if (!(parsed instanceof Map)) {
+				return List.of();
+			}
+			declared = (Map<String, Object>) parsed;
+		} catch (Exception e) {
+			// Not a JSON shape (some steps carry free-form instructions instead);
+			// there is nothing declared to check against.
+			return List.of();
+		}
+		List<String> missing = new java.util.ArrayList<>();
+		for (String field : declared.keySet()) {
+			if (isBlank(mapped.get(field))) {
+				missing.add(field);
+			}
+		}
+		return missing;
+	}
+
+	private static boolean isBlank(Object value) {
+		return value == null || (value instanceof String text && text.isBlank());
 	}
 
 	/**

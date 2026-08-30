@@ -384,4 +384,102 @@ class UserInputStepHandlerTest {
             assertThat(result.getData()).isEqualTo("the sitemap audit");
         }
     }
+
+    @Nested
+    @DisplayName("server-side validation")
+    class Validation {
+
+        /** One required email field — the shape the console produces. */
+        private static final String EMAIL_FORM =
+                "{\"inputMode\":\"STRUCTURED\",\"fields\":[{\"name\":\"email\",\"type\":\"email\","
+                        + "\"label\":\"Email\",\"validations\":{\"required\":true}}]}";
+
+        @Test
+        @DisplayName("an answer that breaks a declared rule re-asks instead of being stored")
+        void invalidAnswerIsRefused() {
+            // The hole this closes: a widget enforced the author's rules and
+            // every messaging channel stored whatever arrived.
+            ExecutionContext context = contextWithAnswer(Map.of("email", "not an address"));
+
+            StepResult result = handler.execute(step("Your email?", EMAIL_FORM), context);
+
+            assertThat(result.getStatus()).isEqualTo("WAITING");
+            assertThat(context.getStatus()).isEqualTo(ExecutionStatus.WAITING_FOR_INPUT);
+            assertThat(variableContext.read(context, "steps.4.output")).isNull();
+            assertThat(result.getMetadata()).containsEntry("subStatus", "VALIDATION_FAILED");
+        }
+
+        @Test
+        @DisplayName("the refusal names the offending field so a widget can highlight it")
+        void refusalCarriesPerFieldErrors() {
+            StepResult result = handler.execute(step("Your email?", EMAIL_FORM),
+                    contextWithAnswer(Map.of("email", "nope")));
+
+            @SuppressWarnings("unchecked")
+            var errors = (java.util.List<Map<String, Object>>) result.getMetadata().get("validationErrors");
+            assertThat(errors).singleElement()
+                    .satisfies(error -> {
+                        assertThat(error.get("field")).isEqualTo("email");
+                        assertThat(String.valueOf(error.get("message"))).isNotBlank();
+                    });
+        }
+
+        @Test
+        @DisplayName("the rejected answer is cleared, or the next turn refuses it again unprompted")
+        void rejectedAnswerDoesNotLinger() {
+            ExecutionContext context = contextWithAnswer(Map.of("email", "nope"));
+
+            handler.execute(step("Your email?", EMAIL_FORM), context);
+
+            assertThat(variableContext.getInputs(context)).doesNotContainKey("answer");
+        }
+
+        @Test
+        @DisplayName("a blank message re-asks rather than satisfying the step with an empty string")
+        void blankAnswerIsRefused() {
+            // Messaging channels can deliver whitespace; storing it used to
+            // complete the step and carry "" into the rest of the journey.
+            ExecutionContext context = contextWithAnswer("   ");
+
+            StepResult result = handler.execute(step("Your name?", null), context);
+
+            assertThat(result.getStatus()).isEqualTo("WAITING");
+            assertThat(variableContext.read(context, "steps.4.output")).isNull();
+        }
+
+        @Test
+        @DisplayName("a valid answer clears the attempt count, so the next question starts fresh")
+        void validAnswerResetsAttempts() {
+            ExecutionContext context = contextWithAnswer(Map.of("email", "nope"));
+            handler.execute(step("Your email?", EMAIL_FORM), context);
+            assertThat(context.getInternal(UserInputStepHandler.ATTEMPTS_PREFIX + 4)).isEqualTo(1);
+
+            variableContext.getInputs(context).put("answer", Map.of("email", "sarah@example.com"));
+            context.setStatus(ExecutionStatus.RUNNING);
+            StepResult result = handler.execute(step("Your email?", EMAIL_FORM), context);
+
+            assertThat(result.getStatus()).isEqualTo("SUCCESS");
+            assertThat(context.getInternal(UserInputStepHandler.ATTEMPTS_PREFIX + 4)).isNull();
+        }
+
+        @Test
+        @DisplayName("after the attempt limit the run halts instead of asking forever")
+        void givesUpAfterTheLimit() {
+            // A question nobody can satisfy — a wrong regex, a field the user
+            // genuinely has no value for — must not become an endless loop.
+            ExecutionContext context = context();
+            StepResult result = null;
+            for (int attempt = 0; attempt < 3; attempt++) {
+                variableContext.getInputs(context).put("answer", Map.of("email", "still not an address"));
+                context.setStatus(ExecutionStatus.RUNNING);
+                result = handler.execute(step("Your email?", EMAIL_FORM), context);
+            }
+
+            assertThat(result).isNotNull();
+            assertThat(result.getStatus()).isEqualTo("ERROR");
+            // The diagnostic is for run history; the user reads the localized one.
+            assertThat(result.getMessage()).contains("Collect colour");
+            assertThat(result.userFacingMessage()).isNotEqualTo(result.getMessage()).isNotBlank();
+        }
+    }
 }

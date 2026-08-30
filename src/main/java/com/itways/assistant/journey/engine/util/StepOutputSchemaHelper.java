@@ -278,6 +278,21 @@ public class StepOutputSchemaHelper {
         return genericDefinition("TRIGGER_JOURNEY", "logic", "Trigger Journey", "hgi-flash", "step-trigger");
     }
 
+    /** HANDOFF: an interaction, like approval — it is where a person enters. */
+    public StepDefinition handoffDefinition() {
+        return genericDefinition("HANDOFF", "interaction", "Human Handoff", "hgi-customer-support", "step-handoff");
+    }
+
+    /** Two outputs, so a later step can branch on the escalation and name its queue. */
+    public StepOutputSchema handoffSchema() {
+        return StepOutputSchema.builder()
+                .stepType("HANDOFF")
+                .fields(List.of(
+                        OutputField.of("output.handedOff", "Handed Off", "boolean"),
+                        OutputField.of("output.queue", "Queue", "string")))
+                .build();
+    }
+
     public StepDefinition sendMailDefinition() {
         return genericDefinition("SEND_MAIL", "interaction", "Send Mail", "hgi-mail-send-01", "step-mail");
     }

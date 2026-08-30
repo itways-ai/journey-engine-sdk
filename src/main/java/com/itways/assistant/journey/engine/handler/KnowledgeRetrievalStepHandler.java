@@ -34,6 +34,88 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
     private final KnowledgeBasePort  knowledgeBasePort;
     private final EngineMessages messages;
     private final TextTranslator translator;
+    private final com.itways.assistant.ai.service.AiService aiService;
+    private final com.itways.assistant.journey.engine.service.AiConfigProvider aiConfigProvider;
+
+    /**
+     * Whether several qualifying chunks are composed into one answer.
+     *
+     * <p>
+     * Off restores the previous behaviour exactly: the single best-scoring
+     * chunk, returned as stored.
+     */
+    @org.springframework.beans.factory.annotation.Value("${nibras.knowledge.synthesis.enabled:true}")
+    private boolean synthesisEnabled = true;
+
+    /** How many chunks may be quoted to the model when composing. */
+    @org.springframework.beans.factory.annotation.Value("${nibras.knowledge.synthesis.max-chunks:3}")
+    private int synthesisMaxChunks = 3;
+
+    /**
+     * Composes one answer from the chunks that cleared the floor, or null to use
+     * the stored text as-is.
+     *
+     * <p>
+     * Retrieval used to be extractive: the top row won and was returned word for
+     * word. That is right when one chunk plainly answers the question and wrong
+     * the moment the answer is split across two — "what is the refund window"
+     * and "what does it exclude" living in separate rows meant the user got half
+     * an answer with no sign the other half existed.
+     *
+     * <p>
+     * Only runs when at least two chunks qualify. A single chunk over the bar
+     * <em>is</em> the answer; sending it to a model to be rephrased costs a call
+     * and risks paraphrasing a carefully worded policy for no gain.
+     *
+     * <p>
+     * Every failure returns null and the caller falls back to the stored answer.
+     * A knowledge step that cannot reach a provider must still answer.
+     */
+    private String synthesize(String query, List<EngineSearchResult> qualifying, ExecutionContext context) {
+        if (!synthesisEnabled || qualifying.size() < 2) {
+            return null;
+        }
+        List<EngineSearchResult> sources = qualifying.subList(0, Math.min(synthesisMaxChunks, qualifying.size()));
+
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("Answer the question using only the sources below.\n")
+                .append("Rules: use only what the sources say; never add facts of your own; ")
+                .append("if the sources do not answer the question, say so plainly; ")
+                .append("answer in ").append(context.resolvedLanguage().englishName())
+                .append("; be brief and do not mention the word source or the numbering.\n\n")
+                .append("Question: ").append(query).append("\n\nSources:\n");
+        for (int i = 0; i < sources.size(); i++) {
+            prompt.append(i + 1).append(". ").append(sources.get(i).answer()).append('\n');
+        }
+
+        try {
+            com.itways.assistant.ai.dto.AiResponse response = aiService.chat(
+                    com.itways.assistant.ai.dto.AiChatRequest.builder()
+                            .messages(List.of(
+                                    com.itways.assistant.ai.dto.AiMessage.system(
+                                            "You answer strictly from supplied reference material."),
+                                    com.itways.assistant.ai.dto.AiMessage.user(prompt.toString())))
+                            .config(aiConfigProvider.getConfig(context.getAccountId()))
+                            .build());
+            String answer = response == null ? null : response.getContent();
+            if (answer == null || answer.isBlank()) {
+                return null;
+            }
+            log.info("🧩 Knowledge answer composed from {} sources", sources.size());
+            return answer.trim();
+        } catch (Exception e) {
+            log.warn("Knowledge synthesis failed, using the stored answer: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** The chunks worth composing from: everything over the answering floor. */
+    private List<EngineSearchResult> qualifying(List<EngineSearchResult> results) {
+        return results.stream()
+                .filter(result -> result.similarity() >= MIN_ABSOLUTE_THRESHOLD)
+                .filter(result -> result.answer() != null && !result.answer().isBlank())
+                .toList();
+    }
 
     @Override
     public String getType() {
@@ -119,9 +201,7 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             // GUARD 2: The "Sure Match" Bypass (For exact Arabic-to-Arabic matches)
             if(bestScore >= SURE_MATCH_THRESHOLD){
                 log.info("🌟 Sure Match bypassed gap check! Score: {}", bestScore);
-                String cleanAnswerText = answerInRunLanguage(bestMatch, context);
-                storeKnowledgeOutput(step, context, cleanAnswerText, true);
-                return StepResult.success(cleanAnswerText, step.getMessage());
+                return respond(step, context, query, results, bestMatch);
             }
 
 //            // Guard 2
@@ -133,16 +213,11 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             // GUARD 3: The "Soft Match" / Cross-Lingual Zone
             if(actualGap < MIN_RELATIVE_GAP) {
                 log.warn("⚠️ Ambiguous cluster detected (Gap {} < {}). Returning best scored answer.", actualGap, MIN_RELATIVE_GAP);
-                String cleanAnswerText = answerInRunLanguage(bestMatch, context);
-                storeKnowledgeOutput(step, context, cleanAnswerText, true);
-                return StepResult.success(cleanAnswerText, step.getMessage());
+                return respond(step, context, query, results, bestMatch);
             }
 
-            String cleanAnswerText = answerInRunLanguage(bestMatch, context);
-            storeKnowledgeOutput(step, context, cleanAnswerText, true);
-
             log.info("✅ Knowledge Retrieval complete (Direct Answer).");
-            return StepResult.success(cleanAnswerText, step.getMessage());
+            return respond(step, context, query, results, bestMatch);
 
         } catch (Exception e) {
             log.error("❌ Knowledge Retrieval failed", e);
@@ -184,6 +259,34 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
 
         // A correct answer in the wrong language beats no answer at all.
         return answer;
+    }
+
+    /**
+     * The answer this step returns: composed where composing helps, the stored
+     * text otherwise.
+     *
+     * <p>
+     * Every accepting path funnels through here so the three score-based routes
+     * — sure match, ambiguous cluster, clear winner — cannot drift apart in what
+     * they actually publish. Synthesis is gated on there being a second
+     * qualifying chunk rather than on which route got here: one chunk over the
+     * floor is already the answer whatever its score.
+     */
+    private StepResult respond(JourneyStep step, ExecutionContext context, String query,
+                               List<EngineSearchResult> results, EngineSearchResult bestMatch) {
+        List<EngineSearchResult> qualifying = qualifying(results);
+        String composed = synthesize(query, qualifying, context);
+        // A composed answer is already in the run's language by instruction;
+        // only a stored one may need translating out of its own.
+        String answer = composed != null ? composed : answerInRunLanguage(bestMatch, context);
+
+        storeKnowledgeOutput(step, context, answer, true);
+        // Sources travel with the output so a client can cite them and support
+        // can see which chunks produced an answer someone disputes.
+        variableContext.writeStepField(context, step, "sources",
+                qualifying.stream().map(EngineSearchResult::answer).toList());
+        variableContext.writeStepField(context, step, "composed", composed != null);
+        return StepResult.success(answer, step.getMessage());
     }
 
     private StepResult triggerFallback(JourneyStep step, ExecutionContext context, String fallbackMsg) {
