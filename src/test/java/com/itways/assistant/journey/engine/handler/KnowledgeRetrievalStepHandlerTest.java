@@ -210,6 +210,77 @@ class KnowledgeRetrievalStepHandlerTest {
         }
 
         @Test
+        @DisplayName("answerMode SINGLE keeps approved wording intact even when two entries match")
+        void singleModeNeverComposes() {
+            // The case this exists for: a policy, a price or a legal clause has
+            // wording someone signed off. Merging or rewording it is not a
+            // cosmetic mistake, and the platform default cannot be right for
+            // both that step and the FAQ step next to it.
+            port.results = List.of(
+                    hit("Refunds are available for 30 days.", 0.88, "en"),
+                    hit("Sale items are excluded from refunds.", 0.81, "en"));
+            ExecutionContext context = context();
+            var composing = handler(TextTranslator.NONE, composingAi("A reworded summary."));
+
+            StepResult result = composing.execute(
+                    step("{\"indexName\":\"faq\",\"answerMode\":\"SINGLE\"}"), context);
+
+            assertThat(result.getData()).isEqualTo("Refunds are available for 30 days.");
+            assertThat(variableContext.read(context, "steps.2.composed")).isEqualTo(false);
+            // The model was never asked.
+            assertThat(lastPrompt).isNull();
+        }
+
+        @Test
+        @DisplayName("answerMode COMPOSE combines even when the platform default is off")
+        void composeModeOverridesTheDefault() {
+            port.results = List.of(
+                    hit("Refunds are available for 30 days.", 0.88, "en"),
+                    hit("Sale items are excluded from refunds.", 0.81, "en"));
+            ExecutionContext context = context();
+            var composing = handler(TextTranslator.NONE, composingAi("Thirty days, sale items excluded."));
+            org.springframework.test.util.ReflectionTestUtils.setField(composing, "synthesisEnabled", false);
+
+            StepResult result = composing.execute(
+                    step("{\"indexName\":\"faq\",\"answerMode\":\"COMPOSE\"}"), context);
+
+            assertThat(result.getData()).isEqualTo("Thirty days, sale items excluded.");
+            assertThat(variableContext.read(context, "steps.2.composed")).isEqualTo(true);
+        }
+
+        @Test
+        @DisplayName("a step that says nothing follows the platform default")
+        void unsetModeFollowsTheDefault() {
+            port.results = List.of(
+                    hit("Refunds are available for 30 days.", 0.88, "en"),
+                    hit("Sale items are excluded from refunds.", 0.81, "en"));
+            ExecutionContext context = context();
+            var composing = handler(TextTranslator.NONE, composingAi("Composed."));
+            org.springframework.test.util.ReflectionTestUtils.setField(composing, "synthesisEnabled", false);
+
+            StepResult result = composing.execute(step("{\"indexName\":\"faq\"}"), context);
+
+            assertThat(result.getData()).isEqualTo("Refunds are available for 30 days.");
+        }
+
+        @Test
+        @DisplayName("a typo in answerMode falls back to the default instead of breaking the step")
+        void unknownModeDegrades() {
+            // A misconfigured step must not take a knowledge base offline.
+            port.results = List.of(
+                    hit("Refunds are available for 30 days.", 0.88, "en"),
+                    hit("Sale items are excluded from refunds.", 0.81, "en"));
+            ExecutionContext context = context();
+            var composing = handler(TextTranslator.NONE, composingAi("Composed."));
+
+            StepResult result = composing.execute(
+                    step("{\"indexName\":\"faq\",\"answerMode\":\"single — please\"}"), context);
+
+            assertThat(result.getStatus()).isEqualTo("SUCCESS");
+            assertThat(result.getData()).isEqualTo("Composed.");
+        }
+
+        @Test
         @DisplayName("an unreachable provider still answers, from the stored chunk")
         void fallsBackToStoredAnswerWhenTheModelFails() {
             port.results = List.of(hit("Use the reset link.", 0.88, "en"),

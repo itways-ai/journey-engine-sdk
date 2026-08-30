@@ -14,7 +14,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Component
@@ -71,8 +73,9 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
      * Every failure returns null and the caller falls back to the stored answer.
      * A knowledge step that cannot reach a provider must still answer.
      */
-    private String synthesize(String query, List<EngineSearchResult> qualifying, ExecutionContext context) {
-        if (!synthesisEnabled || qualifying.size() < 2) {
+    private String synthesize(String query, List<EngineSearchResult> qualifying, ExecutionContext context,
+                              ApiConfig config) {
+        if (!mayCompose(config) || qualifying.size() < 2) {
             return null;
         }
         List<EngineSearchResult> sources = qualifying.subList(0, Math.min(synthesisMaxChunks, qualifying.size()));
@@ -107,6 +110,39 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             log.warn("Knowledge synthesis failed, using the stored answer: {}", e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Whether this step is allowed to combine several entries into one answer.
+     *
+     * <p>
+     * The step decides, and only falls back to the platform default when its
+     * author expressed no preference. That order matters: an assistant
+     * legitimately needs both behaviours at once — a refund window explained
+     * across two entries should read as one answer, while the clause underneath
+     * it must come back in its approved wording, unmerged and unreworded. A
+     * single global switch cannot express that, and getting it wrong on a legal
+     * or pricing answer is not a cosmetic mistake.
+     *
+     * <p>
+     * An unrecognised value falls through to the default rather than failing the
+     * step: a typo in one step's config should not take a knowledge base offline.
+     */
+    private boolean mayCompose(ApiConfig config) {
+        String mode = config == null || config.getAnswerMode() == null
+                ? null
+                : config.getAnswerMode().trim();
+        if (mode == null || mode.isEmpty() || "AUTO".equalsIgnoreCase(mode)) {
+            return synthesisEnabled;
+        }
+        if ("SINGLE".equalsIgnoreCase(mode)) {
+            return false;
+        }
+        if ("COMPOSE".equalsIgnoreCase(mode)) {
+            return true;
+        }
+        log.warn("KNOWLEDGE_RETRIEVAL: unrecognised answerMode '{}' — using the platform default", mode);
+        return synthesisEnabled;
     }
 
     /** The chunks worth composing from: everything over the answering floor. */
@@ -201,7 +237,7 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             // GUARD 2: The "Sure Match" Bypass (For exact Arabic-to-Arabic matches)
             if(bestScore >= SURE_MATCH_THRESHOLD){
                 log.info("🌟 Sure Match bypassed gap check! Score: {}", bestScore);
-                return respond(step, context, query, results, bestMatch);
+                return respond(step, context, query, results, bestMatch, config);
             }
 
 //            // Guard 2
@@ -213,11 +249,11 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
             // GUARD 3: The "Soft Match" / Cross-Lingual Zone
             if(actualGap < MIN_RELATIVE_GAP) {
                 log.warn("⚠️ Ambiguous cluster detected (Gap {} < {}). Returning best scored answer.", actualGap, MIN_RELATIVE_GAP);
-                return respond(step, context, query, results, bestMatch);
+                return respond(step, context, query, results, bestMatch, config);
             }
 
             log.info("✅ Knowledge Retrieval complete (Direct Answer).");
-            return respond(step, context, query, results, bestMatch);
+            return respond(step, context, query, results, bestMatch, config);
 
         } catch (Exception e) {
             log.error("❌ Knowledge Retrieval failed", e);
@@ -273,9 +309,10 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
      * floor is already the answer whatever its score.
      */
     private StepResult respond(JourneyStep step, ExecutionContext context, String query,
-                               List<EngineSearchResult> results, EngineSearchResult bestMatch) {
+                               List<EngineSearchResult> results, EngineSearchResult bestMatch,
+                               ApiConfig config) {
         List<EngineSearchResult> qualifying = qualifying(results);
-        String composed = synthesize(query, qualifying, context);
+        String composed = synthesize(query, qualifying, context, config);
         // A composed answer is already in the run's language by instruction;
         // only a stored one may need translating out of its own.
         String answer = composed != null ? composed : answerInRunLanguage(bestMatch, context);
@@ -286,7 +323,19 @@ public class KnowledgeRetrievalStepHandler implements StepHandler {
         variableContext.writeStepField(context, step, "sources",
                 qualifying.stream().map(EngineSearchResult::answer).toList());
         variableContext.writeStepField(context, step, "composed", composed != null);
-        return StepResult.success(answer, step.getMessage());
+
+        // Also on the step view, not just in the variables: the simulator's
+        // trace is where an author checks whether an answer was merged or came
+        // back as stored, and that is the whole point of the setting.
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("composed", composed != null);
+        metadata.put("sourceCount", qualifying.size());
+        return StepResult.builder()
+                .status("SUCCESS")
+                .data(answer)
+                .message(step.getMessage())
+                .metadata(metadata)
+                .build();
     }
 
     private StepResult triggerFallback(JourneyStep step, ExecutionContext context, String fallbackMsg) {

@@ -59,6 +59,26 @@ public class ApiConfig {
     private Integer limit;
     private Double threshold;
 
+    /**
+     * KNOWLEDGE_RETRIEVAL: how this step is allowed to answer.
+     *
+     * <ul>
+     * <li>{@code SINGLE} — return the single best-matching entry exactly as it
+     * is stored, never merged and never reworded. What a policy, a price, a
+     * legal clause or anything with approved wording needs.
+     * <li>{@code COMPOSE} — when several entries match, combine them into one
+     * answer. Right when a question is genuinely answered across two entries.
+     * <li>{@code AUTO} (or null) — follow the platform default,
+     * {@code nibras.knowledge.synthesis.enabled}.
+     * </ul>
+     *
+     * <p>
+     * Per step rather than per platform because the same assistant legitimately
+     * needs both: a refund window explained across two entries should read as
+     * one answer, while the clause underneath it must come back word for word.
+     */
+    private String answerMode;
+
     // Elite: Human Approval
     private String approvalMode; // SELF_CONFIRM | STAKEHOLDER
     private String stakeholders;
