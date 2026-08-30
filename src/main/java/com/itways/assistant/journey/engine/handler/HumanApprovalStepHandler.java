@@ -3,14 +3,12 @@ package com.itways.assistant.journey.engine.handler;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 
 import org.springframework.stereotype.Component;
 
 import com.itways.assistant.journey.engine.context.VariableContext;
-import com.itways.assistant.journey.engine.language.ConversationLanguage;
+import com.itways.assistant.journey.engine.language.DecisionWords;
 import com.itways.assistant.journey.engine.language.EngineMessages;
 import com.itways.assistant.journey.engine.model.ApiConfig;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
@@ -38,58 +36,22 @@ public class HumanApprovalStepHandler implements StepHandler {
     private static final int DEFAULT_TIMEOUT_HOURS = 24;
 
     /**
-     * Answers that count as a decision, pooled across every supported language.
+     * Reads a decision out of whatever the person typed.
      *
      * <p>
-     * Anything outside these sets is treated as an unclear reply and re-prompted:
-     * this step used to accept <em>any</em> non-null answer as approval, so "no"
-     * granted the approval it was refusing.
-     *
-     * <p>
-     * Pooled rather than filtered by the conversation's language on purpose. People
-     * answer a prompt in whatever is fastest to type; "ok" lands in Arabic threads
-     * constantly, and refusing it because the conversation is in Arabic would be a
-     * regression dressed up as correctness. Sourcing the words from the bundles means
-     * a new language brings its own vocabulary with its translation file and nothing
-     * here changes.
+     * The vocabulary used to live here, and moved to {@link DecisionWords} when
+     * USER_INPUT's pre-fill confirmation needed the same question answered. The
+     * behaviour is unchanged, including the part that matters: anything outside
+     * the known words is an unclear reply and re-prompts, because this step once
+     * accepted <em>any</em> non-null answer as approval and "no" granted the
+     * approval it was refusing.
      */
-    private final Set<String> approveWords = new HashSet<>();
-    private final Set<String> rejectWords = new HashSet<>();
+    private final DecisionWords decisionWords;
 
     private final EngineUtils engineUtils;
     private final VariableContext variableContext;
     private final StepOutputSchemaHelper schemaHelper;
     private final EngineMessages messages;
-
-    @jakarta.annotation.PostConstruct
-    void loadDecisionVocabulary() {
-        for (ConversationLanguage language : ConversationLanguage.values()) {
-            collectInto(approveWords, messages.get(language, "step.approval.approveWords"));
-            collectInto(rejectWords, messages.get(language, "step.approval.rejectWords"));
-        }
-        // A word claimed by both lists is a translation bug, and silently letting
-        // APPROVE win would mean a refusal performing the action it refused.
-        Set<String> ambiguous = new HashSet<>(approveWords);
-        ambiguous.retainAll(rejectWords);
-        if (!ambiguous.isEmpty()) {
-            log.error("HUMAN_APPROVAL: {} appear as both approval and rejection; treating them as unclear",
-                    ambiguous);
-            approveWords.removeAll(ambiguous);
-            rejectWords.removeAll(ambiguous);
-        }
-    }
-
-    private static void collectInto(Set<String> target, String commaSeparated) {
-        if (commaSeparated == null || commaSeparated.isBlank()) {
-            return;
-        }
-        for (String word : commaSeparated.split(",")) {
-            String trimmed = word.trim().toLowerCase();
-            if (!trimmed.isEmpty()) {
-                target.add(trimmed);
-            }
-        }
-    }
 
     @Override
     public String getType() {
@@ -214,22 +176,7 @@ public class HumanApprovalStepHandler implements StepHandler {
      * from structured form replies; everything else is free text from a channel.
      */
     private Boolean interpret(Object answer) {
-        if (answer instanceof Boolean bool) {
-            return bool;
-        }
-        String normalized = String.valueOf(answer).trim().toLowerCase();
-        // Strip trailing punctuation so "yes!" and "no." still read as decisions.
-        normalized = normalized.replaceAll("[\\p{Punct}\\s]+$", "");
-        if (normalized.isEmpty()) {
-            return null;
-        }
-        if (approveWords.contains(normalized)) {
-            return Boolean.TRUE;
-        }
-        if (rejectWords.contains(normalized)) {
-            return Boolean.FALSE;
-        }
-        return null;
+        return decisionWords.interpret(answer);
     }
 
     /** An unreadable deadline must not trap the run, so treat it as not yet set. */

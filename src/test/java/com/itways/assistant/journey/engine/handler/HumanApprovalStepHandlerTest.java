@@ -2,6 +2,7 @@ package com.itways.assistant.journey.engine.handler;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.itways.assistant.journey.engine.context.VariableContext;
+import com.itways.assistant.journey.engine.language.DecisionWords;
 import com.itways.assistant.journey.engine.language.EngineMessages;
 import com.itways.assistant.journey.engine.model.ExecutionContext;
 import com.itways.assistant.journey.engine.model.ExecutionStatus;
@@ -34,12 +35,13 @@ class HumanApprovalStepHandlerTest {
 
     @BeforeEach
     void buildHandler() {
-        handler = new HumanApprovalStepHandler(
+        // @PostConstruct does not run outside Spring; without load() both
+        // vocabularies are empty and every answer reads as "unclear".
+        DecisionWords decisionWords = new DecisionWords(new EngineMessages());
+        decisionWords.load();
+        handler = new HumanApprovalStepHandler(decisionWords,
                 new EngineUtils(objectMapper), variableContext,
                 new StepOutputSchemaHelper(objectMapper), new EngineMessages());
-        // @PostConstruct does not run outside Spring; without this call both
-        // vocabularies are empty and every answer reads as "unclear".
-        handler.loadDecisionVocabulary();
     }
 
     private static ExecutionContext contextWithAnswer(Object answer) {

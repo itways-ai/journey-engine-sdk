@@ -18,7 +18,12 @@ public class VariableContext {
             "text", "files", "entities", "answer", "forceIntent", "channel",
             // Lifted onto the context by LanguageParams; an entities copy would
             // look authoritative to an author while changing nothing.
-            LanguageParams.PARAM_LANGUAGE);
+            LanguageParams.PARAM_LANGUAGE,
+            // Stripped by the caller before the engine runs, so this is defence
+            // rather than the primary guard. It matters because the value is a
+            // memory partition key: an author who could write it could point the
+            // next turn at another conversation's history.
+            ConversationParams.PARAM_CONVERSATION_ID);
 
     public void ensureStructure(ExecutionContext context) {
         Map<String, Object> vars = context.getVariables();

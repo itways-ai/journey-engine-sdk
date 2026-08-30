@@ -25,6 +25,22 @@ public class ApiConfig {
     @Builder.Default
     private String inputMode = "FREE_TEXT"; // FREE_TEXT, STRUCTURED, INTERACTIVE
     private String confirmationMessage; // INTERACTIVE: shown in phase 2 before form confirmation
+    /**
+     * USER_INPUT: an extracted entity that may answer this step instead of asking.
+     *
+     * <p>
+     * Names an entry the intent classifier put in {@code inputs.entities} — so
+     * {@code fillFrom: "task"} reads {@code inputs.entities.task}. When present,
+     * the step offers the value back for a yes/no rather than asking cold, and
+     * never accepts it silently: the author wrote that question, and skipping it
+     * outright would remove a checkpoint on journeys that complete, delegate or
+     * archive things.
+     *
+     * <p>
+     * Null on every step that has not opted in, which is what keeps this inert
+     * for journeys authored before it existed.
+     */
+    private String fillFrom;
     private Object fields;
     private Object rules;
 
