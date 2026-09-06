@@ -23,7 +23,10 @@ public class VariableContext {
             // rather than the primary guard. It matters because the value is a
             // memory partition key: an author who could write it could point the
             // next turn at another conversation's history.
-            ConversationParams.PARAM_CONVERSATION_ID);
+            ConversationParams.PARAM_CONVERSATION_ID,
+            // Lifted into internals by ChannelCapabilities; a journey must not be
+            // able to read what its channel cannot do.
+            ChannelCapabilities.PARAM_CAPABILITIES);
 
     public void ensureStructure(ExecutionContext context) {
         Map<String, Object> vars = context.getVariables();

@@ -166,6 +166,9 @@ public class TriggerJourneyStepHandler implements StepHandler {
             // Without this the child re-resolves from scratch and answers in the
             // account default while its parent is mid-conversation in Arabic.
             LanguageParams.inherit(childParams, context);
+            // Same channel, same limits: a child asked to show a form on a phone
+            // call would otherwise refuse the caller's spoken answer.
+            com.itways.assistant.journey.engine.context.ChannelCapabilities.inherit(childParams, context);
 
             log.info("Starting triggered journey '{}' parentExecutionId={} rootExecutionId={}",
                     intent, context.getExecutionId(), rootId);

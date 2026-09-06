@@ -108,6 +108,10 @@ public class JourneyEngineImpl implements JourneyEngine {
         // journey can read {{simulate}} and behave differently under test.
         com.itways.assistant.journey.engine.context.Simulation.lift(context, params);
 
+        // And for what the channel can do (show a form, open a link): a fact
+        // about the transport, never a variable a journey can branch on.
+        com.itways.assistant.journey.engine.context.ChannelCapabilities.lift(context, params);
+
         // The conversation language arrives the same way, and must be on the
         // context before seedRuntime publishes {{runtime.language}} from it.
         LanguageParams.lift(context, params);
@@ -209,6 +213,8 @@ public class JourneyEngineImpl implements JourneyEngine {
         // A rehearsal stays a rehearsal across every turn: the flag is already
         // on the parked context, and this only catches a resume that re-sends it.
         com.itways.assistant.journey.engine.context.Simulation.lift(context, pending);
+        // A run parked on a widget and resumed from a phone is on the phone now.
+        com.itways.assistant.journey.engine.context.ChannelCapabilities.lift(context, pending);
         LanguageParams.lift(context, pending);
         context.setInternal(TriggerJourneyStepHandler.PENDING_RESUME_INPUT, pending);
         context.setStatus(ExecutionStatus.RUNNING);

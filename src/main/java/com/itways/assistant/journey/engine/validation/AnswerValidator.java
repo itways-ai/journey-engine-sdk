@@ -184,6 +184,27 @@ public final class AnswerValidator {
     }
 
     /** Field names any conditional rule can act on — exempt from required. */
+    /**
+     * The fields a channel without a form has to ask for, in declared order.
+     *
+     * <p>
+     * Conditional fields are left out: their visibility depends on rules the
+     * engine cannot evaluate, and asking a question the form would have hidden
+     * is worse than leaving the answer blank — which is also what the
+     * server-side validation already allows for them.
+     */
+    public static List<Map<String, Object>> fieldsToAsk(Object fieldsConfig, Object rulesConfig) {
+        Set<String> conditional = conditionalFields(rulesConfig);
+        List<Map<String, Object>> askable = new ArrayList<>();
+        for (Map<String, Object> field : asMapList(fieldsConfig)) {
+            String name = name(field);
+            if (name != null && !conditional.contains(name)) {
+                askable.add(field);
+            }
+        }
+        return askable;
+    }
+
     private static Set<String> conditionalFields(Object rulesConfig) {
         Set<String> names = new HashSet<>();
         for (Map<String, Object> rule : asMapList(rulesConfig)) {

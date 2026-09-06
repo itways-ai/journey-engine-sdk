@@ -18,6 +18,11 @@ public class StepDefinition {
     private boolean supportsBranches;
     private boolean waitsForInput;
     private boolean writesToState;
+    /**
+     * Per-channel support, e.g. {@code {"voice": "ADAPTED"}} — see
+     * {@code ChannelSupport}. Filled by the registry when the catalog is served.
+     */
+    private java.util.Map<String, String> channels;
 
     public static StepDefinition of(String type) {
         return StepDefinition.builder().type(type).label(type).build();

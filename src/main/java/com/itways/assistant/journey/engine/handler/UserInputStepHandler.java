@@ -6,6 +6,7 @@ import java.util.Map;
 
 import org.springframework.stereotype.Component;
 
+import com.itways.assistant.journey.engine.context.ChannelCapabilities;
 import com.itways.assistant.journey.engine.context.VariableContext;
 import com.itways.assistant.journey.engine.language.DecisionWords;
 import com.itways.assistant.journey.engine.language.EngineMessages;
@@ -102,6 +103,18 @@ public class UserInputStepHandler implements StepHandler {
             Object candidate = prefillCandidate(uiConfig, inputs);
             if (candidate != null) {
                 return offerPrefill(step, context, uiConfig, candidate, prefillKey);
+            }
+        }
+
+        // A multi-field form on a channel that cannot show one — a phone call, a
+        // chat thread — is collected one question at a time. A form that did
+        // arrive whole (a Map) takes the normal path regardless.
+        if ("STRUCTURED".equalsIgnoreCase(uiConfig.getInputMode())
+                && !ChannelCapabilities.supportsForm(context)
+                && !(answer instanceof Map)) {
+            StepResult fieldByField = askFieldByField(step, context, uiConfig, inputs, answer);
+            if (fieldByField != null) {
+                return fieldByField;
             }
         }
 
@@ -342,6 +355,186 @@ public class UserInputStepHandler implements StepHandler {
         return (step.getMessage() != null && !step.getMessage().isEmpty())
                 ? engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())
                 : messages.get(context.resolvedLanguage(), "step.userInput.waiting", step.getStepName());
+    }
+
+    // ───────────────────────── one field at a time ─────────────────────────
+
+    /** Engine-internal: the answers collected so far for a form asked field by field. */
+    static final String PARTIAL_PREFIX = "userInputPartial_";
+    /** Engine-internal: index of the field currently being asked. */
+    static final String CURSOR_PREFIX = "userInputCursor_";
+    /** What a waiting step publishes while collecting a form one field at a time. */
+    static final String SUB_STATUS_FIELD_BY_FIELD = "FIELD_BY_FIELD";
+
+    /**
+     * Collects a multi-field form as a sequence of single questions, or returns
+     * null when the form has at most one askable field — the existing path
+     * already reads a scalar as that field's value.
+     *
+     * <p>
+     * Each answer is validated against its own field with the same rules a form
+     * submission would face, so a rejected value re-asks the same question. When
+     * the last field is in, the assembled map is stored exactly as a widget's
+     * form would have been: downstream steps cannot tell the two apart.
+     */
+    @SuppressWarnings("unchecked")
+    private StepResult askFieldByField(JourneyStep step, ExecutionContext context, ApiConfig uiConfig,
+                                       Map<String, Object> inputs, Object answer) {
+        List<Map<String, Object>> fields = AnswerValidator.fieldsToAsk(uiConfig.getFields(), uiConfig.getRules());
+        if (fields.size() <= 1) {
+            return null;
+        }
+        String partialKey = PARTIAL_PREFIX + step.getStepOrder();
+        String cursorKey = CURSOR_PREFIX + step.getStepOrder();
+        String attemptsKey = ATTEMPTS_PREFIX + step.getStepOrder();
+
+        Map<String, Object> partial = context.getInternal(partialKey) instanceof Map<?, ?> m
+                ? new HashMap<>((Map<String, Object>) m)
+                : null;
+        int cursor = context.getInternal(cursorKey) instanceof Number n ? n.intValue() : 0;
+        if (partial == null) {
+            // First entry. Anything already in `answer` was not said in reply to
+            // a question of ours, so it is not an answer to the first field.
+            partial = new HashMap<>();
+            cursor = 0;
+            answer = null;
+        }
+
+        while (cursor < fields.size()) {
+            Map<String, Object> field = fields.get(cursor);
+            String name = String.valueOf(field.get("name")).trim();
+            if (isFileField(field)) {
+                clearFieldByField(context, partialKey, cursorKey, attemptsKey);
+                return StepResult.error(
+                        "USER_INPUT step '" + step.getStepName() + "' needs a file for field '" + name
+                                + "', which this channel cannot carry",
+                        messages.get(context.resolvedLanguage(), "step.userInput.fileUnsupported"));
+            }
+            if (answer == null) {
+                return askField(step, context, uiConfig, field, cursor, fields.size(), partial, partialKey,
+                        cursorKey, null);
+            }
+
+            inputs.remove("answer");
+            Object value = matchOption(field, answer);
+            boolean blank = value instanceof String text && text.isBlank();
+            Map<String, Object> single = new HashMap<>();
+            single.put(name, value);
+            List<AnswerValidator.FieldError> errors = blank
+                    ? List.of()
+                    : AnswerValidator.validate(single, List.of(field), uiConfig.getRules());
+            if (blank || !errors.isEmpty()) {
+                int attempts = (context.getInternal(attemptsKey) instanceof Number n ? n.intValue() : 0) + 1;
+                if (attempts >= maxAttempts) {
+                    clearFieldByField(context, partialKey, cursorKey, attemptsKey);
+                    return StepResult.error(
+                            "USER_INPUT step '" + step.getStepName() + "' gave up after " + attempts
+                                    + " invalid answers to field '" + name + "': " + describe(errors, context),
+                            messages.get(context.resolvedLanguage(), "step.userInput.tooManyAttempts"));
+                }
+                context.setInternal(attemptsKey, attempts);
+                String complaint = blank
+                        ? messages.get(context.resolvedLanguage(), "step.userInput.empty")
+                        : messages.get(context.resolvedLanguage(), "step.userInput.fixErrors",
+                                describe(errors, context));
+                return askField(step, context, uiConfig, field, cursor, fields.size(), partial, partialKey,
+                        cursorKey, complaint);
+            }
+
+            context.removeInternal(attemptsKey);
+            partial.put(name, value);
+            cursor++;
+            answer = null;
+        }
+
+        clearFieldByField(context, partialKey, cursorKey, attemptsKey);
+        variableContext.storeOutput(context, step, partial);
+        return StepResult.success(partial, prompt(step, context));
+    }
+
+    /** Parks the run on one field, remembering what has been collected so far. */
+    private StepResult askField(JourneyStep step, ExecutionContext context, ApiConfig uiConfig,
+                                Map<String, Object> field, int cursor, int total, Map<String, Object> partial,
+                                String partialKey, String cursorKey, String complaint) {
+        context.setInternal(partialKey, partial);
+        context.setInternal(cursorKey, cursor);
+        context.setStatus(ExecutionStatus.WAITING_FOR_INPUT);
+
+        String label = field.get("label") != null && !String.valueOf(field.get("label")).isBlank()
+                ? String.valueOf(field.get("label")).trim()
+                : String.valueOf(field.get("name")).trim();
+        StringBuilder question = new StringBuilder();
+        if (complaint != null) {
+            question.append(complaint).append(' ');
+        } else if (cursor == 0 && partial.isEmpty() && step.getMessage() != null && !step.getMessage().isEmpty()) {
+            // The author's own framing of the form, once, before the first field.
+            question.append(engineUtils.replacePlaceholders(step.getMessage(), context.getVariables())).append(' ');
+        }
+        question.append(messages.get(context.resolvedLanguage(), "step.userInput.fieldOf", cursor + 1, total, label));
+        String options = optionLabels(field);
+        if (!options.isEmpty()) {
+            question.append(' ').append(messages.get(context.resolvedLanguage(), "step.userInput.fieldOptions", options));
+        }
+
+        Map<String, Object> metadata = prepareMetadata(step, uiConfig);
+        metadata.put("subStatus", SUB_STATUS_FIELD_BY_FIELD);
+        metadata.put("fieldIndex", cursor);
+        metadata.put("fieldCount", total);
+        Map<String, Object> current = new HashMap<>();
+        current.put("name", field.get("name"));
+        current.put("label", label);
+        current.put("type", field.get("type"));
+        metadata.put("field", current);
+        return StepResult.waiting(question.toString().trim(), metadata);
+    }
+
+    private void clearFieldByField(ExecutionContext context, String partialKey, String cursorKey,
+                                   String attemptsKey) {
+        context.removeInternal(partialKey);
+        context.removeInternal(cursorKey);
+        context.removeInternal(attemptsKey);
+    }
+
+    private static boolean isFileField(Map<String, Object> field) {
+        String type = field.get("type") == null ? "" : String.valueOf(field.get("type")).toLowerCase(java.util.Locale.ROOT);
+        return type.equals("file") || type.equals("files") || type.equals("attachment") || type.equals("image");
+    }
+
+    /**
+     * A spoken or typed answer to a choice field matched against the choices:
+     * the label or the value, case-insensitively. Anything else is kept as
+     * said, and validation decides.
+     */
+    private static Object matchOption(Map<String, Object> field, Object answer) {
+        if (!(answer instanceof String said) || !(field.get("options") instanceof Iterable<?> options)) {
+            return answer;
+        }
+        String wanted = said.trim().toLowerCase(java.util.Locale.ROOT);
+        for (Object option : options) {
+            if (!(option instanceof Map<?, ?> choice)) {
+                continue;
+            }
+            String label = choice.get("label") == null ? "" : String.valueOf(choice.get("label")).trim();
+            String value = choice.get("value") == null ? "" : String.valueOf(choice.get("value")).trim();
+            if (wanted.equals(label.toLowerCase(java.util.Locale.ROOT))
+                    || wanted.equals(value.toLowerCase(java.util.Locale.ROOT))) {
+                return value.isEmpty() ? label : value;
+            }
+        }
+        return answer;
+    }
+
+    private static String optionLabels(Map<String, Object> field) {
+        if (!(field.get("options") instanceof Iterable<?> options)) {
+            return "";
+        }
+        List<String> labels = new java.util.ArrayList<>();
+        for (Object option : options) {
+            if (option instanceof Map<?, ?> choice && choice.get("label") != null) {
+                labels.add(String.valueOf(choice.get("label")).trim());
+            }
+        }
+        return String.join(", ", labels);
     }
 
     private Map<String, Object> prepareMetadata(JourneyStep step, ApiConfig uiConfig) {

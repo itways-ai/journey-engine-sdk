@@ -40,6 +40,7 @@ public class StepOutputRegistry {
     public List<StepDefinition> getCatalog() {
         return handlersByType.values().stream()
                 .map(StepHandler::describe)
+                .map(com.itways.assistant.journey.engine.util.ChannelSupport::annotate)
                 .toList();
     }
 }
