@@ -127,6 +127,27 @@ class ApiCallStepHandlerTest {
         }
 
         @Test
+        @DisplayName("a call written as the end user fails before it is sent when nobody is signed in, flagged for the channel")
+        void userRequiredWhenNoToken() {
+            ExecutionContext context = context();
+
+            var result = handler.execute(step(server.url("/me"), """
+                    {"headers":{"Authorization":"Bearer {{auth.userToken}}"}}
+                    """), context);
+
+            assertThat(result.getStatus()).isEqualTo("ERROR");
+            assertThat(result.getMetadata()).containsEntry(ApiCallStepHandler.META_USER_REQUIRED, true);
+            assertThat(result.userFacingMessage()).contains("signed in");
+            assertThat(server.uri).as("nothing reaches the host").isNull();
+
+            // A call that does not act as the user is unaffected.
+            var plain = handler.execute(step(server.url("/public"), """
+                    {"headers":{"X-Api-Key":"k"}}
+                    """), context);
+            assertThat(plain.getStatus()).isEqualTo("SUCCESS");
+        }
+
+        @Test
         @DisplayName("the end-user token never resolves in the URL or the body")
         void tokenStaysOutOfUrlAndBody() throws Exception {
             ExecutionContext context = context();

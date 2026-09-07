@@ -83,6 +83,19 @@ public class ApiCallStepHandler implements StepHandler {
 				return simulate(step, context, config, url);
 			}
 
+			if (needsUserToken(config) && EndUserAuth.token(context) == null) {
+				// Acting as the user with nobody signed in. Said plainly, in the
+				// run's language, and flagged so a channel can offer to verify
+				// the person rather than read out a 401 from the host.
+				log.warn("API_CALL step '{}' acts as the end user but no user token was supplied", step.getStepName());
+				return StepResult.builder()
+						.status("ERROR")
+						.message("API call acts as the end user but no user token was supplied")
+						.userMessage(messages.get(context.resolvedLanguage(), "step.apiCall.userRequired"))
+						.metadata(Map.of(META_USER_REQUIRED, true))
+						.build();
+			}
+
 			HttpHeaders headers = new HttpHeaders();
 			headers.setContentType(MediaType.APPLICATION_JSON);
 			Map<String, Object> headerScope = headerScope(context);
@@ -177,6 +190,22 @@ public class ApiCallStepHandler implements StepHandler {
 	 * prompt. Headers are the only scope that gets it — URLs end up in logs and
 	 * bodies are persisted with the run.
 	 */
+	/** Set on the step view when the call could not run because nobody was signed in. */
+	public static final String META_USER_REQUIRED = "userRequired";
+
+	private static final String USER_TOKEN_REFERENCE = EndUserAuth.SCOPE + "." + EndUserAuth.FIELD_USER_TOKEN;
+
+	private final com.itways.assistant.journey.engine.language.EngineMessages messages = new com.itways.assistant.journey.engine.language.EngineMessages();
+
+	/** True when any header of the call is written to carry the end-user token. */
+	static boolean needsUserToken(ApiConfig config) {
+		if (config == null || config.getHeaders() == null) {
+			return false;
+		}
+		return config.getHeaders().values().stream()
+				.anyMatch(value -> value != null && value.contains(USER_TOKEN_REFERENCE));
+	}
+
 	private Map<String, Object> headerScope(ExecutionContext context) {
 		String token = EndUserAuth.token(context);
 		if (token == null) {
