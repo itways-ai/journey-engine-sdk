@@ -92,17 +92,17 @@ class UserInputFieldByFieldTest {
 
 			StepResult first = handler.execute(step, context);
 			assertThat(first.getStatus()).isEqualTo("WAITING");
-			assertThat(first.getMessage()).isEqualTo("Let us create the task. Question 1 of 3: Task title");
+			assertThat(first.getMessage()).isEqualTo("Let us create the task. 1 of 3: what is the Task title?");
 			assertThat(first.getMetadata()).containsEntry("subStatus", "FIELD_BY_FIELD")
 					.containsEntry("fieldIndex", 0).containsEntry("fieldCount", 3);
 
 			StepResult second = answer(step, context, "Buy milk");
 			assertThat(second.getStatus()).isEqualTo("WAITING");
-			assertThat(second.getMessage()).isEqualTo("Question 2 of 3: Priority The options are: High, Low.");
+			assertThat(second.getMessage()).isEqualTo("2 of 3: what is the Priority? The options are: High, Low.");
 
 			StepResult third = answer(step, context, "high");
 			assertThat(third.getStatus()).isEqualTo("WAITING");
-			assertThat(third.getMessage()).isEqualTo("Question 3 of 3: Email");
+			assertThat(third.getMessage()).isEqualTo("3 of 3: what is the Email?");
 
 			StepResult done = answer(step, context, "sarah@example.com");
 			assertThat(done.getStatus()).isEqualTo("SUCCESS");
@@ -154,7 +154,7 @@ class UserInputFieldByFieldTest {
 			StepResult bad = answer(step, context, "not-an-email");
 			assertThat(bad.getStatus()).isEqualTo("WAITING");
 			assertThat(bad.getMessage()).startsWith(messages.get(context.resolvedLanguage(), "step.userInput.fixErrors", "").trim())
-					.endsWith("Question 3 of 3: Email");
+					.endsWith("3 of 3: what is the Email?");
 			assertThat(bad.getMetadata()).containsEntry("fieldIndex", 2);
 
 			StepResult good = answer(step, context, "ok@example.com");
@@ -172,7 +172,7 @@ class UserInputFieldByFieldTest {
 
 			assertThat(blank.getStatus()).isEqualTo("WAITING");
 			assertThat(blank.getMessage()).contains(messages.get(context.resolvedLanguage(), "step.userInput.empty"))
-					.endsWith("Question 1 of 3: Task title");
+					.endsWith("1 of 3: what is the Task title?");
 		}
 
 		@Test

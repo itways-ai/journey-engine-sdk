@@ -6,7 +6,7 @@
 
     <groupId>com.itways.assistant</groupId>
     <artifactId>journey-engine-sdk</artifactId>
-    <version>1.0.12</version>
+    <version>1.0.13</version>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
@@ -47,7 +47,7 @@
 		<dependency>
 			<groupId>com.itways.assistant</groupId>
 			<artifactId>ai-engine-sdk</artifactId>
-			<version>1.0.2</version>
+			<version>1.0.3</version>
 		</dependency>
         <dependency>
             <groupId>org.graalvm.js</groupId>
